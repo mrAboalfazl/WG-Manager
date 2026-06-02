@@ -11,6 +11,52 @@ IFACE="${WG_IFACE:-wg0}"
 say(){ printf '\033[0;36m[wgmgr]\033[0m %s\n' "$*"; }
 err(){ printf '\033[0;31m[wgmgr] %s\033[0m\n' "$*" >&2; }
 
+# Bootstrap a fresh native WireGuard server (only when none exists). Produces the
+# /etc/wireguard/{params,wg0.conf} format wgmgr expects. Override via WG_PORT/WG_SUBNET/WG_DNS1/WG_DNS2.
+bootstrap_wireguard(){
+  say "no WireGuard found — setting up a fresh native WireGuard server…"
+  local port="${WG_PORT:-51820}" subnet="${WG_SUBNET:-10.66.66.0/24}"
+  local dns1="${WG_DNS1:-1.1.1.1}" dns2="${WG_DNS2:-1.0.0.1}"
+  local nic; nic="$(ip -4 route ls default 2>/dev/null | awk '{print $5; exit}')"
+  [ -n "$nic" ] || { err "could not detect the default network interface"; exit 1; }
+  local pubip; pubip="$(curl -fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)"
+  [ -n "$pubip" ] || pubip="$(ip -4 addr show "$nic" | awk '/inet /{print $2}' | cut -d/ -f1 | head -n1)"
+  local priv pub; priv="$(wg genkey)"; pub="$(printf '%s' "$priv" | wg pubkey)"
+  local cidr="${subnet##*/}" srvip="${subnet%.*}.1"
+  umask 077; mkdir -p /etc/wireguard
+  cat > /etc/wireguard/params <<P
+SERVER_PUB_IP=${pubip}
+SERVER_PUB_NIC=${nic}
+SERVER_WG_NIC=${IFACE}
+SERVER_WG_IPV4=${srvip}
+SERVER_PORT=${port}
+SERVER_PRIV_KEY=${priv}
+SERVER_PUB_KEY=${pub}
+CLIENT_DNS_1=${dns1}
+CLIENT_DNS_2=${dns2}
+ALLOWED_IPS=0.0.0.0/0
+P
+  cat > "/etc/wireguard/${IFACE}.conf" <<C
+[Interface]
+Address = ${srvip}/${cidr}
+ListenPort = ${port}
+PrivateKey = ${priv}
+PostUp = iptables -I INPUT -p udp --dport ${port} -j ACCEPT
+PostUp = iptables -I FORWARD -i ${nic} -o ${IFACE} -j ACCEPT
+PostUp = iptables -I FORWARD -i ${IFACE} -j ACCEPT
+PostUp = iptables -t nat -A POSTROUTING -o ${nic} -j MASQUERADE
+PostDown = iptables -D INPUT -p udp --dport ${port} -j ACCEPT
+PostDown = iptables -D FORWARD -i ${nic} -o ${IFACE} -j ACCEPT
+PostDown = iptables -D FORWARD -i ${IFACE} -j ACCEPT
+PostDown = iptables -t nat -D POSTROUTING -o ${nic} -j MASQUERADE
+C
+  chmod 600 "/etc/wireguard/${IFACE}.conf" /etc/wireguard/params
+  echo 'net.ipv4.ip_forward=1' > /etc/sysctl.d/99-wg-forward.conf
+  sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
+  systemctl enable --now "wg-quick@${IFACE}" >/dev/null 2>&1
+  say "WireGuard up: ${IFACE} udp/${port}, subnet ${subnet}, egress ${nic}, public ${pubip}"
+}
+
 [ "$(id -u)" = 0 ] || { err "please run as root"; exit 1; }
 
 case "$(uname -m)" in
@@ -27,9 +73,7 @@ fi
 command -v wg >/dev/null 2>&1 || { err "wireguard-tools (wg) not found — set up WireGuard first."; exit 1; }
 
 if [ ! -f "/etc/wireguard/${IFACE}.conf" ] || [ ! -f /etc/wireguard/params ]; then
-  err "expected /etc/wireguard/${IFACE}.conf and /etc/wireguard/params (a native WireGuard install)."
-  err "Install WireGuard first (e.g. the angristan 'wireguard-install.sh'), then re-run this."
-  exit 1
+  bootstrap_wireguard
 fi
 
 # --- obtain the binary: prefer a published release, else build from source ---

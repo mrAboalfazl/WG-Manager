@@ -23,20 +23,26 @@ their **existing config** (no re-issue).
 
 ## Requirements
 - Linux (Ubuntu/Debian tested), root.
-- An existing **native WireGuard** install with `/etc/wireguard/wg0.conf` + `/etc/wireguard/params`
-  (e.g. the popular [`angristan/wireguard-install`](https://github.com/angristan/wireguard-install)).
-- `ipset`, `wireguard-tools` (the installer adds these).
+- **A fresh server is fine** — the installer sets up native WireGuard automatically if none exists
+  (override defaults with `WG_PORT`, `WG_SUBNET`, `WG_DNS1`, `WG_DNS2`).
+- If you **already run native WireGuard** (e.g. [`angristan/wireguard-install`](https://github.com/angristan/wireguard-install)),
+  it's detected and used as-is. `ipset` / `wireguard-tools` are installed automatically.
 
 ## Install / update
 ```bash
 curl -fsSL https://raw.githubusercontent.com/mrAboalfazl/WG-Manager/main/install.sh | bash
 ```
-It installs deps, drops the `wgmgr` binary, imports any existing peers, generates an API token +
-a **random admin password** (printed once), and starts the service. Re-run anytime to update.
+It installs deps, **sets up native WireGuard if none exists**, drops the `wgmgr` binary, imports any
+existing peers, generates an API token + a **random admin password** (printed once), and starts the
+service. Re-run anytime to update. Customize the WireGuard bootstrap, e.g.:
+```bash
+curl -fsSL https://raw.githubusercontent.com/mrAboalfazl/WG-Manager/main/install.sh | WG_PORT=51820 WG_SUBNET=10.8.0.0/24 bash
+```
 
 After install:
 - **Panel:** `https://<server-ip>:8443` — log in as `admin` / the printed password (self-signed
-  cert → accept the browser warning). Change it: `wgmgr set-login <user> <pass>`.
+  cert → accept the browser warning). Change the password anytime from the panel's **⚙ Settings**,
+  or via CLI: `wgmgr set-login <user> <pass>`.
 - **API token:** in `/etc/wgmgr/config.json`.
 
 ## CLI

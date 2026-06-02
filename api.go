@@ -79,6 +79,7 @@ func startAPI(cfg Config, db *sql.DB) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", a.serveUI)
 	mux.HandleFunc("POST /login", a.login)
+	mux.HandleFunc("POST /change-password", a.guard(a.changePassword))
 	mux.HandleFunc("GET /peers/{name}/qr", a.guard(a.qrPeer))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok\n")) })
 	mux.HandleFunc("GET /peers", a.guard(a.listPeers))
@@ -320,4 +321,24 @@ func (a *api) disableH(w http.ResponseWriter, r *http.Request) {
 	p := a.mustPeer(r)
 	a.db.Exec("UPDATE peers SET enabled=0,updated_at=? WHERE id=?", nowUTC(), p.ID)
 	writeJSON(w, 200, peerJSON(a.mustPeer(r)))
+}
+
+// changePassword updates the panel/admin password (verifies the current one first).
+// The bearer token is unchanged, so the current session stays valid.
+func (a *api) changePassword(w http.ResponseWriter, r *http.Request) {
+	m := readJSON(r)
+	cur, _ := m["current_password"].(string)
+	nw, _ := m["new_password"].(string)
+	if len(nw) < 4 {
+		die("new password must be at least 4 characters")
+	}
+	if a.cfg.AdminPassHash != "" && !checkPass(a.cfg.AdminPassHash, cur) {
+		die("current password is incorrect")
+	}
+	newHash := hashPass(nw)
+	cfg := loadConfig()
+	cfg.AdminPassHash = newHash
+	saveConfig(cfg)
+	a.cfg.AdminPassHash = newHash
+	writeJSON(w, 200, map[string]any{"ok": true})
 }

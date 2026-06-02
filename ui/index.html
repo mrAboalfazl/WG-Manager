@@ -112,6 +112,7 @@
     <div class="logo">wgmgr</div>
     <div style="display:flex;align-items:center;gap:14px">
       <span id="srv" style="color:var(--mut);font-size:12.5px"></span>
+      <button class="btn ghost sm" onclick="openSettings()">⚙ Settings</button>
       <button class="btn ghost sm" onclick="logout()">Logout</button>
     </div>
   </header>
@@ -275,6 +276,21 @@ function openRenew(u){
 async function doRenew(u){
   try{await api('POST',`/peers/${encodeURIComponent(u)}/renew`,{add_days:+$('#m-rdays').value||30});
     toast('Time extended','ok');closeModal();refresh();}catch(e){toast(e.message,'err');}
+}
+
+function openSettings(){modal(`
+  <h3>Change password</h3><p class="sub">Update your panel login password — you'll stay signed in.</p>
+  <label>Current password</label><input id="cp-cur" type="password" autocomplete="current-password" autofocus>
+  <label style="margin-top:14px">New password</label><input id="cp-new" type="password" autocomplete="new-password">
+  <label style="margin-top:14px">Confirm new password</label><input id="cp-cnf" type="password" autocomplete="new-password" onkeydown="if(event.key==='Enter')doChangePassword()">
+  <div class="row"><button class="btn ghost" onclick="closeModal()">Cancel</button>
+  <button class="btn" onclick="doChangePassword()">Change password</button></div>`);}
+async function doChangePassword(){
+  const cur=$('#cp-cur').value, nw=$('#cp-new').value, cnf=$('#cp-cnf').value;
+  if(!nw||nw.length<4){toast('New password must be at least 4 characters','err');return;}
+  if(nw!==cnf){toast('Passwords do not match','err');return;}
+  try{await api('POST','/change-password',{current_password:cur,new_password:nw});
+    toast('Password changed','ok');closeModal();}catch(e){toast(e.message,'err');}
 }
 
 async function toggle(u,enabled){
