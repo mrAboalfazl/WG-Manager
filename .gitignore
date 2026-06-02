@@ -1,0 +1,15 @@
+# build output
+/wgmgr
+/wgmgr-linux-*
+*.exe
+dist/
+
+# runtime state / secrets — never commit
+*.pem
+config.json
+*.db
+*.db-wal
+*.db-shm
+
+# local toolchains / caches
+go-toolchain/

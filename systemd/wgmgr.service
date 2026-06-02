@@ -1,0 +1,13 @@
+[Unit]
+Description=wgmgr (WireGuard user/quota manager + enforcement)
+After=wg-quick@wg0.service network-online.target
+Wants=wg-quick@wg0.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/wgmgr serve
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

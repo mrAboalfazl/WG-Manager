@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>wgmgr · WireGuard Panel</title>
+<style>
+  :root{
+    --bg:#0d0f17; --bg2:#141826; --card:#171b2b; --card2:#1d2235; --line:#262c42;
+    --txt:#e8ecf6; --mut:#8b93ad; --accent:#6d8bff; --accent2:#a06bff;
+    --ok:#34d399; --warn:#fbbf24; --bad:#f87171; --shadow:0 10px 30px rgba(0,0,0,.35);
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:'Segoe UI',Roboto,system-ui,sans-serif;background:
+    radial-gradient(1200px 600px at 80% -10%,rgba(109,139,255,.15),transparent),
+    radial-gradient(900px 500px at -10% 20%,rgba(160,107,255,.12),transparent),var(--bg);
+    color:var(--txt);min-height:100vh;font-size:14px}
+  .hidden{display:none!important}
+  button{font-family:inherit;cursor:pointer;border:none;border-radius:10px;font-weight:600;transition:.15s}
+  input,select{font-family:inherit;background:var(--bg2);border:1px solid var(--line);color:var(--txt);
+    border-radius:10px;padding:11px 13px;font-size:14px;width:100%;outline:none}
+  input:focus,select:focus{border-color:var(--accent)}
+  .btn{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;padding:11px 18px}
+  .btn:hover{filter:brightness(1.1)}
+  .btn.ghost{background:var(--card2);color:var(--txt);border:1px solid var(--line)}
+  .btn.sm{padding:7px 11px;font-size:12.5px;border-radius:8px}
+  .btn.danger{background:rgba(248,113,113,.15);color:var(--bad);border:1px solid rgba(248,113,113,.3)}
+  .btn.danger:hover{background:rgba(248,113,113,.25)}
+
+  /* login */
+  #login{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
+  #login .box{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:40px;
+    width:100%;max-width:400px;box-shadow:var(--shadow)}
+  .logo{font-size:26px;font-weight:800;background:linear-gradient(135deg,var(--accent),var(--accent2));
+    -webkit-background-clip:text;background-clip:text;color:transparent;text-align:center}
+  .logo small{display:block;font-size:12px;color:var(--mut);font-weight:500;margin-top:6px;-webkit-text-fill-color:var(--mut)}
+  #login label{display:block;color:var(--mut);font-size:12.5px;margin:22px 0 8px}
+
+  /* app */
+  header{display:flex;align-items:center;justify-content:space-between;padding:18px 26px;
+    border-bottom:1px solid var(--line);background:rgba(20,24,38,.6);backdrop-filter:blur(8px);
+    position:sticky;top:0;z-index:10}
+  header .logo{font-size:20px;text-align:left}
+  .wrap{max-width:1180px;margin:0 auto;padding:26px}
+  .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:24px}
+  .stat{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:18px 20px}
+  .stat .n{font-size:28px;font-weight:800;margin-top:4px}
+  .stat .l{color:var(--mut);font-size:12.5px;text-transform:uppercase;letter-spacing:.5px}
+  .stat .dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:6px}
+
+  .toolbar{display:flex;gap:12px;align-items:center;margin-bottom:16px;flex-wrap:wrap}
+  .toolbar .search{flex:1;min-width:200px;max-width:340px}
+  .panel{background:var(--card);border:1px solid var(--line);border-radius:16px;overflow:hidden}
+  table{width:100%;border-collapse:collapse}
+  th{text-align:left;color:var(--mut);font-size:11.5px;text-transform:uppercase;letter-spacing:.5px;
+    padding:14px 16px;border-bottom:1px solid var(--line);font-weight:600}
+  td{padding:14px 16px;border-bottom:1px solid var(--line);vertical-align:middle}
+  tr:last-child td{border-bottom:none}
+  tr:hover td{background:rgba(109,139,255,.04)}
+  .uname{font-weight:700}.ip{color:var(--mut);font-size:12.5px;font-family:monospace}
+  .badge{display:inline-flex;align-items:center;gap:5px;padding:4px 9px;border-radius:20px;font-size:11.5px;font-weight:600}
+  .b-on{background:rgba(52,211,153,.15);color:var(--ok)} .b-off{background:rgba(139,147,173,.15);color:var(--mut)}
+  .b-bad{background:rgba(248,113,113,.15);color:var(--bad)}
+  .bar{height:7px;background:var(--bg2);border-radius:6px;overflow:hidden;margin-top:5px;width:130px}
+  .bar i{display:block;height:100%;background:linear-gradient(90deg,var(--accent),var(--accent2));border-radius:6px}
+  .bar i.hi{background:linear-gradient(90deg,var(--warn),var(--bad))}
+  .use{font-size:12.5px}.use b{font-weight:700}
+  .acts{display:flex;gap:6px;justify-content:flex-end}
+  .empty{padding:50px;text-align:center;color:var(--mut)}
+
+  /* modal */
+  .ov{position:fixed;inset:0;background:rgba(5,7,12,.7);backdrop-filter:blur(4px);display:flex;
+    align-items:center;justify-content:center;z-index:50;padding:20px}
+  .modal{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:26px;
+    width:100%;max-width:440px;box-shadow:var(--shadow)}
+  .modal h3{font-size:18px;margin-bottom:4px}.modal p.sub{color:var(--mut);font-size:13px;margin-bottom:18px}
+  .modal label{display:block;color:var(--mut);font-size:12.5px;margin:14px 0 7px}
+  .modal .row{display:flex;gap:10px;margin-top:22px}.modal .row .btn{flex:1}
+  .qr{display:flex;flex-direction:column;align-items:center;gap:14px}
+  .qr img{width:230px;height:230px;border-radius:12px;background:#fff;padding:10px}
+  pre{background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:12px;
+    font-size:11.5px;overflow:auto;max-height:170px;white-space:pre-wrap;width:100%;color:var(--mut)}
+  .seg{display:flex;gap:8px}.seg button{flex:1;background:var(--bg2);border:1px solid var(--line);color:var(--mut);padding:9px}
+  .seg button.on{background:rgba(109,139,255,.18);color:var(--accent);border-color:var(--accent)}
+
+  /* toasts */
+  #toasts{position:fixed;bottom:22px;right:22px;display:flex;flex-direction:column;gap:10px;z-index:99}
+  .toast{background:var(--card2);border:1px solid var(--line);border-left:3px solid var(--accent);
+    padding:12px 18px;border-radius:10px;box-shadow:var(--shadow);min-width:220px;animation:sl .25s}
+  .toast.ok{border-left-color:var(--ok)}.toast.err{border-left-color:var(--bad)}
+  @keyframes sl{from{transform:translateX(40px);opacity:0}to{transform:none;opacity:1}}
+  @media(max-width:760px){.stats{grid-template-columns:repeat(2,1fr)}.hide-sm{display:none}}
+</style>
+</head>
+<body>
+
+<!-- LOGIN -->
+<div id="login">
+  <div class="box">
+    <div class="logo">wgmgr<small>WireGuard management panel</small></div>
+    <label>Username</label>
+    <input id="lu" placeholder="username" autocomplete="username">
+    <label style="margin-top:16px">Password</label>
+    <input id="lp" type="password" placeholder="password" autocomplete="current-password" onkeydown="if(event.key==='Enter')doLogin()">
+    <button class="btn" style="width:100%;margin-top:20px" onclick="doLogin()">Sign in</button>
+  </div>
+</div>
+
+<!-- APP -->
+<div id="app" class="hidden">
+  <header>
+    <div class="logo">wgmgr</div>
+    <div style="display:flex;align-items:center;gap:14px">
+      <span id="srv" style="color:var(--mut);font-size:12.5px"></span>
+      <button class="btn ghost sm" onclick="logout()">Logout</button>
+    </div>
+  </header>
+  <div class="wrap">
+    <div class="stats">
+      <div class="stat"><div class="l">Total users</div><div class="n" id="s-total">–</div></div>
+      <div class="stat"><div class="l"><span class="dot" style="background:var(--ok)"></span>Online</div><div class="n" id="s-online">–</div></div>
+      <div class="stat"><div class="l"><span class="dot" style="background:var(--bad)"></span>Blocked</div><div class="n" id="s-blocked">–</div></div>
+      <div class="stat"><div class="l">Total usage</div><div class="n" id="s-usage">–</div></div>
+    </div>
+    <div class="toolbar">
+      <input class="search" id="search" placeholder="🔍  Search users…" oninput="render()">
+      <div style="flex:1"></div>
+      <button class="btn ghost sm" onclick="refresh()">↻ Refresh</button>
+      <button class="btn" onclick="openAdd()">+ Add user</button>
+    </div>
+    <div class="panel">
+      <table>
+        <thead><tr><th>User</th><th>Usage</th><th class="hide-sm">Expires</th><th>Status</th><th style="text-align:right">Actions</th></tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+      <div id="empty" class="empty hidden">No users yet. Click <b>+ Add user</b> to create one.</div>
+    </div>
+  </div>
+</div>
+
+<div id="modalRoot"></div>
+<div id="toasts"></div>
+
+<script>
+const $=s=>document.querySelector(s);
+let TOKEN=sessionStorage.getItem('wgmgr_token')||'';
+let PEERS=[], SERVER='', timer=null;
+
+function toast(msg,type){const t=document.createElement('div');t.className='toast '+(type||'');t.textContent=msg;
+  $('#toasts').appendChild(t);setTimeout(()=>t.remove(),3500);}
+
+async function api(method,path,body){
+  const opt={method,headers:{'Authorization':'Bearer '+TOKEN}};
+  if(body){opt.headers['Content-Type']='application/json';opt.body=JSON.stringify(body);}
+  const r=await fetch(path,opt);
+  if(r.status===401){logout();throw new Error('unauthorized');}
+  const ct=r.headers.get('content-type')||'';
+  const data=ct.includes('json')?await r.json():await r.text();
+  if(!r.ok)throw new Error((data&&data.error)||('HTTP '+r.status));
+  return data;
+}
+
+async function doLogin(){
+  const u=$('#lu').value.trim(), p=$('#lp').value;
+  if(!u||!p){toast('Enter username and password','err');return;}
+  try{
+    const r=await fetch('/login',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({username:u,password:p})});
+    const d=await r.json();
+    if(!r.ok||!d.token)throw new Error(d.error||'login failed');
+    TOKEN=d.token;sessionStorage.setItem('wgmgr_token',TOKEN);showApp();
+  }catch(e){toast(e.message||'Login failed','err');}
+}
+function logout(){sessionStorage.removeItem('wgmgr_token');TOKEN='';if(timer)clearInterval(timer);
+  $('#app').classList.add('hidden');$('#login').classList.remove('hidden');const lp=$('#lp');if(lp)lp.value='';}
+function showApp(){$('#login').classList.add('hidden');$('#app').classList.remove('hidden');
+  refresh();timer=setInterval(refresh,12000);}
+
+function fmtGB(g){g=+g||0;return g<1?(g*1024).toFixed(0)+' MB':g.toFixed(2)+' GB';}
+function daysLeft(iso){if(!iso)return null;const d=Math.ceil((new Date(iso)-Date.now())/86400000);return d;}
+
+async function refresh(){
+  try{const d=await api('GET','/peers');PEERS=d.peers||[];SERVER=d.server||'';
+    $('#srv').textContent=SERVER?('server '+SERVER):'';render();}
+  catch(e){if(e.message!=='unauthorized')toast(e.message,'err');}
+}
+
+function render(){
+  const q=($('#search').value||'').toLowerCase();
+  const list=PEERS.filter(p=>p.username.toLowerCase().includes(q));
+  $('#s-total').textContent=PEERS.length;
+  $('#s-online').textContent=PEERS.filter(p=>p.online).length;
+  $('#s-blocked').textContent=PEERS.filter(p=>p.blocked).length;
+  $('#s-usage').textContent=fmtGB(PEERS.reduce((a,p)=>a+(+p.used_gb||0),0));
+  const rows=$('#rows');rows.innerHTML='';
+  $('#empty').classList.toggle('hidden',list.length>0);
+  for(const p of list){
+    const pct=p.quota_gb>0?Math.min(100,Math.round(p.used_gb/p.quota_gb*100)):0;
+    const hi=pct>=85?'hi':'';
+    const dl=daysLeft(p.expires_at);
+    const exp=p.expires_at?(dl<0?'<span style="color:var(--bad)">expired</span>':dl+' days'):'never';
+    const status=p.blocked?'<span class="badge b-bad">● blocked</span>':
+      (p.online?'<span class="badge b-on">● online</span>':'<span class="badge b-off">● offline</span>');
+    const quota=p.quota_gb>0?fmtGB(p.quota_gb):'∞';
+    const tr=document.createElement('tr');
+    tr.innerHTML=`
+      <td><div class="uname">${esc(p.username)}</div><div class="ip">${p.address}</div></td>
+      <td><div class="use"><b>${fmtGB(p.used_gb)}</b> / ${quota}</div>
+        ${p.quota_gb>0?`<div class="bar"><i class="${hi}" style="width:${pct}%"></i></div>`:''}</td>
+      <td class="hide-sm">${exp}</td>
+      <td>${status}</td>
+      <td><div class="acts">
+        <button class="btn ghost sm" onclick="showQR('${enc(p.username)}')" title="Config & QR">Config</button>
+        <button class="btn ghost sm" onclick="openRecharge('${enc(p.username)}')" title="Data / quota">Data</button>
+        <button class="btn ghost sm" onclick="openRenew('${enc(p.username)}')" title="Extend time">Renew</button>
+        <button class="btn ghost sm" onclick="toggle('${enc(p.username)}',${p.enabled})">${p.enabled?'Disable':'Enable'}</button>
+        <button class="btn danger sm" onclick="del('${enc(p.username)}')">Delete</button>
+      </div></td>`;
+    rows.appendChild(tr);
+  }
+}
+function esc(s){return (s+'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
+function enc(s){return (s+'').replace(/'/g,"\\'");}
+
+function modal(html){$('#modalRoot').innerHTML=`<div class="ov" onclick="if(event.target===this)closeModal()"><div class="modal">${html}</div></div>`;}
+function closeModal(){$('#modalRoot').innerHTML='';}
+
+function openAdd(){modal(`
+  <h3>Add user</h3><p class="sub">Creates a peer and returns its config + QR.</p>
+  <label>Username</label><input id="m-user" placeholder="e.g. alice" autofocus>
+  <label>Data quota (GB) — 0 = unlimited</label><input id="m-quota" type="number" value="50" min="0">
+  <label>Valid for (days) — 0 = no expiry</label><input id="m-days" type="number" value="30" min="0">
+  <div class="row"><button class="btn ghost" onclick="closeModal()">Cancel</button>
+  <button class="btn" onclick="addUser()">Create</button></div>`);}
+async function addUser(){
+  const username=$('#m-user').value.trim();if(!username){toast('Username required','err');return;}
+  const quota_gb=+$('#m-quota').value||0, days=+$('#m-days').value||0;
+  try{const p=await api('POST','/peers',{username,quota_gb,days});toast('User created','ok');
+    await refresh();qrModal(p.username,p.client_config);}
+  catch(e){toast(e.message,'err');}
+}
+
+function openRecharge(u){modal(`
+  <h3>Recharge · ${esc(u)}</h3><p class="sub">Reset usage and/or change the quota.</p>
+  <div class="seg" id="seg"><button class="on" data-m="reset" onclick="segPick(this)">Reset usage</button>
+    <button data-m="set" onclick="segPick(this)">Set quota</button>
+    <button data-m="add" onclick="segPick(this)">Add data</button></div>
+  <div id="gbwrap" class="hidden"><label>GB</label><input id="m-gb" type="number" value="50" min="0"></div>
+  <div class="row"><button class="btn ghost" onclick="closeModal()">Cancel</button>
+  <button class="btn" onclick="doRecharge('${enc(u)}')">Apply</button></div>`);}
+let segMode='reset';
+function segPick(b){document.querySelectorAll('#seg button').forEach(x=>x.classList.remove('on'));
+  b.classList.add('on');segMode=b.dataset.m;$('#gbwrap').classList.toggle('hidden',segMode==='reset');}
+async function doRecharge(u){
+  const body={};if(segMode==='reset')body.reset=true;
+  else if(segMode==='set')body.set_gb=+$('#m-gb').value||0;else body.add_gb=+$('#m-gb').value||0;
+  try{await api('POST',`/peers/${encodeURIComponent(u)}/recharge`,body);toast('Recharged','ok');closeModal();refresh();}
+  catch(e){toast(e.message,'err');}
+}
+
+function openRenew(u){
+  const p=PEERS.find(x=>x.username===u)||{};const dl=daysLeft(p.expires_at);
+  const cur=p.expires_at?(dl<0?'<span style="color:var(--bad)">expired</span>':'in '+dl+' days'):'never expires';
+  modal(`
+  <h3>Renew · ${esc(u)}</h3>
+  <p class="sub">Current: <b>${cur}</b>. Extending keeps the <b>same config</b> — the user never needs a new one.</p>
+  <label>Extend by (days)</label><input id="m-rdays" type="number" value="30" min="1" autofocus>
+  <div class="seg" style="margin-top:10px">
+    <button type="button" onclick="document.getElementById('m-rdays').value=30">+30</button>
+    <button type="button" onclick="document.getElementById('m-rdays').value=90">+90</button>
+    <button type="button" onclick="document.getElementById('m-rdays').value=180">+180</button>
+    <button type="button" onclick="document.getElementById('m-rdays').value=365">+365</button></div>
+  <div class="row"><button class="btn ghost" onclick="closeModal()">Cancel</button>
+  <button class="btn" onclick="doRenew('${enc(u)}')">Extend</button></div>`);}
+async function doRenew(u){
+  try{await api('POST',`/peers/${encodeURIComponent(u)}/renew`,{add_days:+$('#m-rdays').value||30});
+    toast('Time extended','ok');closeModal();refresh();}catch(e){toast(e.message,'err');}
+}
+
+async function toggle(u,enabled){
+  try{await api('POST',`/peers/${encodeURIComponent(u)}/${enabled?'disable':'enable'}`);
+    toast(enabled?'Disabled':'Enabled','ok');refresh();}catch(e){toast(e.message,'err');}
+}
+async function del(u){
+  if(!confirm('Delete user "'+u+'"? This removes their access.'))return;
+  try{await api('DELETE','/peers/'+encodeURIComponent(u));toast('Deleted','ok');refresh();}
+  catch(e){toast(e.message,'err');}
+}
+
+async function showQR(u){
+  try{const cfg=await api('GET','/peers/'+encodeURIComponent(u)+'/config');qrModal(u,cfg);}
+  catch(e){toast(e.message,'err');}
+}
+async function qrModal(u,cfg){
+  modal(`<h3>${esc(u)}</h3><p class="sub">Scan in the WireGuard app, or download the config.</p>
+    <div class="qr"><img id="qrimg" alt="loading QR…"><pre id="cfgtext">${esc(cfg||'')}</pre></div>
+    <div class="row"><button class="btn ghost" onclick="copyCfg()">Copy</button>
+    <button class="btn ghost" onclick="dlCfg('${enc(u)}')">Download</button>
+    <button class="btn" onclick="closeModal()">Done</button></div>`);
+  window._cfg=cfg||'';
+  try{const r=await fetch('/peers/'+encodeURIComponent(u)+'/qr',{headers:{'Authorization':'Bearer '+TOKEN}});
+    if(r.ok){const b=await r.blob();const im=$('#qrimg');if(im)im.src=URL.createObjectURL(b);}}catch(e){}
+}
+function copyCfg(){navigator.clipboard.writeText(window._cfg||'').then(()=>toast('Copied','ok'));}
+function dlCfg(u){const b=new Blob([window._cfg||''],{type:'text/plain'});const a=document.createElement('a');
+  a.href=URL.createObjectURL(b);a.download=u+'.conf';a.click();}
+
+// boot
+if(TOKEN){api('GET','/peers').then(showApp).catch(()=>logout());}
+</script>
+</body>
+</html>
