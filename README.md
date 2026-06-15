@@ -40,10 +40,12 @@ curl -fsSL https://raw.githubusercontent.com/mrAboalfazl/WG-Manager/main/install
 ```
 
 After install:
-- **Panel:** `https://<server-ip>:8443` — log in as `admin` / the printed password (self-signed
-  cert → accept the browser warning). Change the password anytime from the panel's **⚙ Settings**,
-  or via CLI: `wgmgr set-login <user> <pass>`.
-- **API token:** in `/etc/wgmgr/config.json`.
+- **Panel:** served on a **secret web path** printed at the end of install, e.g.
+  `https://<server-ip>:8443/<path>/` (the bare `https://<server-ip>:8443/` returns 404 — the panel is
+  hidden from scanners). Log in as `admin` / the printed password (self-signed cert → accept the browser
+  warning). Change the password from the panel's **⚙ Settings** or `wgmgr set-login <user> <pass>`;
+  change the path with `wgmgr set-base-path </p>` (use `/` to serve at the root, the old behavior).
+- **API token:** in `/etc/wgmgr/config.json` (the path is stored there as `base_path`).
 
 ## CLI
 ```
@@ -54,14 +56,17 @@ wgmgr recharge <user> [--reset] [--add-gb N] [--set-gb N]
 wgmgr renew <user> <days>                     # extend time
 wgmgr enable|disable|rm <user>
 wgmgr set-login <user> <pass>                 # panel/admin credentials
+wgmgr set-base-path </path|/>                 # serve the panel/API under a secret web path (/ = root)
 wgmgr import                                  # import peers from wg0.conf into the DB
 wgmgr render                                  # rewrite wg0.conf peer section from DB + apply
 wgmgr serve                                   # daemon: enforcement loop + HTTPS API (systemd)
 ```
 
 ## API
-HTTPS + bearer token on `:8443`. Full reference, payloads, examples, and a backend integration
-recipe: **[`docs/API.md`](docs/API.md)**.
+HTTPS + bearer token on `:8443`, under the **same secret web base path as the panel** (e.g.
+`https://<ip>:8443/<path>/peers`). The path is printed at install and stored as `base_path` in
+`/etc/wgmgr/config.json`. Full reference, payloads, examples, and a backend integration recipe:
+**[`docs/API.md`](docs/API.md)**.
 
 ## How it works (brief)
 - SQLite (`/var/lib/wgmgr/wgmgr.db`) is the source of truth → renders the `[Peer]` section of
@@ -72,6 +77,8 @@ recipe: **[`docs/API.md`](docs/API.md)**.
 
 ## Security notes
 - The API token is **full admin** — keep it secret; restrict `:8443` to trusted IPs if possible.
+- The panel/API are served under a random **secret web path** (`base_path`) and the bare root 404s —
+  defense-in-depth on top of the token/login, not a replacement for them.
 - Quota enforcement is **poll-based** (~3 min), so it's near-real-time, not byte-exact.
 - The panel/API use a self-signed cert by default; put it behind a real cert/reverse-proxy for
   public use, or pin the cert in your backend.

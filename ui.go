@@ -3,6 +3,7 @@ package main
 import (
 	"embed"
 	"net/http"
+	"strings"
 
 	qrcode "github.com/skip2/go-qrcode"
 )
@@ -18,8 +19,10 @@ func (a *api) serveUI(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "ui not found", 500)
 		return
 	}
+	// Inject the web base path so the SPA's fetch() calls target /<base>/... not /...
+	html := strings.Replace(string(b), "__WGMGR_BASE__", normBase(a.cfg.BasePath), 1)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Write(b)
+	w.Write([]byte(html))
 }
 
 // qrPeer returns a PNG QR code of the peer's client config (token-guarded).

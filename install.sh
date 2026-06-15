@@ -126,7 +126,9 @@ systemctl daemon-reload
 systemctl enable --now wgmgr.service
 
 IP="$(curl -fsS --max-time 5 https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')"
+# secret web base path the panel/API are served under (empty when upgrading a pre-base-path install)
+BASE="$(sed -n 's/.*"base_path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' /etc/wgmgr/config.json 2>/dev/null)"
 say "done ✅"
-say "Panel:  https://${IP}:8443   (login = admin / the password printed above)"
-say "API:    token in /etc/wgmgr/config.json  ·  docs: https://github.com/${REPO}/blob/main/docs/API.md"
-say "CLI:    wgmgr list | add <user> --quota-gb N --days D | set-login <user> <pass>"
+say "Panel:  https://${IP}:8443${BASE}/   (login = admin / the password printed above)"
+say "API:    base https://${IP}:8443${BASE}  ·  token in /etc/wgmgr/config.json  ·  docs: https://github.com/${REPO}/blob/main/docs/API.md"
+say "CLI:    wgmgr list | add <user> --quota-gb N --days D | set-login <user> <pass> | set-base-path </p>"

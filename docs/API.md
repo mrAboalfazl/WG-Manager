@@ -7,7 +7,7 @@ backend.
 ## Connection
 | | |
 |---|---|
-| Base URL | `https://<SERVER_IP>:8443` |
+| Base URL | `https://<SERVER_IP>:8443<base_path>` — the secret web path from `/etc/wgmgr/config.json` (`base_path`), printed at install. e.g. `https://1.2.3.4:8443/a1b2c3`. (Empty `base_path` = served at root.) |
 | Auth | header `Authorization: Bearer <API_TOKEN>`  (or `X-API-Token: <API_TOKEN>`) |
 | Token | in `/etc/wgmgr/config.json` on the server (`api_token`) |
 | TLS | self-signed by default — pin the cert in your backend, or skip verification for testing |
@@ -71,7 +71,7 @@ Errors: HTTP 4xx with `{"error":"…"}`; unauthorized → `401 {"error":"unautho
 ## Example
 ```bash
 TOKEN=…                          # from /etc/wgmgr/config.json
-B=https://<SERVER_IP>:8443; H="Authorization: Bearer $TOKEN"
+B=https://<SERVER_IP>:8443<base_path>; H="Authorization: Bearer $TOKEN"   # base_path from /etc/wgmgr/config.json
 curl -sk -H "$H" -H 'Content-Type: application/json' -d '{"username":"alice","quota_gb":50,"days":30}' $B/peers
 curl -sk -H "$H" $B/peers/alice
 curl -sk -H "$H" -d '{"add_days":30}' $B/peers/alice/renew

@@ -92,9 +92,19 @@ func startAPI(cfg Config, db *sql.DB) {
 	mux.HandleFunc("POST /peers/{name}/quota", a.guard(a.setQuota))
 	mux.HandleFunc("POST /peers/{name}/enable", a.guard(a.enableH))
 	mux.HandleFunc("POST /peers/{name}/disable", a.guard(a.disableH))
-	srv := &http.Server{Addr: cfg.APIListen, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	// Mount everything under the configured web base path (e.g. /a1b2c3). Empty base =
+	// root = unchanged behavior. Outside the prefix nothing is registered, so the bare
+	// root 404s and the panel is dark to scanners hitting IP:PORT/.
+	var handler http.Handler = mux
+	bp := normBase(cfg.BasePath)
+	if bp != "" {
+		outer := http.NewServeMux()
+		outer.Handle(bp+"/", http.StripPrefix(bp, mux))
+		handler = outer
+	}
+	srv := &http.Server{Addr: cfg.APIListen, Handler: handler, ReadHeaderTimeout: 10 * time.Second}
 	go func() {
-		fmt.Printf("api: HTTPS listening on %s\n", cfg.APIListen)
+		fmt.Printf("api: HTTPS listening on %s (path %s/)\n", cfg.APIListen, bp)
 		if err := srv.ListenAndServeTLS(cfg.TLSCert, cfg.TLSKey); err != nil {
 			fmt.Fprintf(os.Stderr, "api: server stopped: %v\n", err)
 		}
