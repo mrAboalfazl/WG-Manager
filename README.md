@@ -45,7 +45,9 @@ After install:
   hidden from scanners). Log in as `admin` / the printed password (self-signed cert → accept the browser
   warning). Change the password from the panel's **⚙ Settings** or `wgmgr set-login <user> <pass>`;
   change the path with `wgmgr set-base-path </p>` (use `/` to serve at the root, the old behavior).
-- **API token:** in `/etc/wgmgr/config.json` (the path is stored there as `base_path`).
+- **API token:** view or **regenerate** it from the panel's **⚙ Settings**, or read it on the server
+  in `/etc/wgmgr/config.json` (`api_token`). Regenerating invalidates the old token immediately — update
+  any backend that uses it.
 
 ## CLI
 ```

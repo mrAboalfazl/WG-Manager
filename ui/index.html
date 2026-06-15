@@ -280,12 +280,38 @@ async function doRenew(u){
 }
 
 function openSettings(){modal(`
+  <h3>Settings</h3>
+  <label>API token</label>
+  <div style="display:flex;gap:8px;align-items:center">
+    <input id="apitok" type="password" readonly value="••••••••••••" style="flex:1;font-family:monospace;font-size:12px">
+    <button class="btn ghost sm" type="button" onclick="toggleTok()" title="Show / hide">👁</button>
+    <button class="btn ghost sm" type="button" onclick="copyTok()" title="Copy">Copy</button>
+  </div>
+  <p class="sub" style="margin-top:8px">Full-admin token for backend/API access. <b>Regenerating invalidates the old token immediately</b> — update any backend that uses it.</p>
+  <button class="btn ghost" type="button" onclick="regenTok()" style="width:100%">↻ Regenerate token</button>
+  <hr style="border:none;border-top:1px solid var(--line);margin:22px 0">
   <h3>Change password</h3><p class="sub">Update your panel login password — you'll stay signed in.</p>
-  <label>Current password</label><input id="cp-cur" type="password" autocomplete="current-password" autofocus>
+  <label>Current password</label><input id="cp-cur" type="password" autocomplete="current-password">
   <label style="margin-top:14px">New password</label><input id="cp-new" type="password" autocomplete="new-password">
   <label style="margin-top:14px">Confirm new password</label><input id="cp-cnf" type="password" autocomplete="new-password" onkeydown="if(event.key==='Enter')doChangePassword()">
   <div class="row"><button class="btn ghost" onclick="closeModal()">Cancel</button>
-  <button class="btn" onclick="doChangePassword()">Change password</button></div>`);}
+  <button class="btn" onclick="doChangePassword()">Change password</button></div>`);loadTok();}
+
+let _apitok='';
+async function loadTok(){try{const d=await api('GET','/api-token');_apitok=d.token||'';}catch(e){_apitok='';}}
+function toggleTok(){const el=$('#apitok');if(!el)return;
+  if(el.type==='password'){el.type='text';el.value=_apitok||'(none)';}
+  else{el.type='password';el.value='••••••••••••';}}
+function copyTok(){if(!_apitok){toast('Token not loaded yet','err');return;}
+  navigator.clipboard.writeText(_apitok).then(()=>toast('Token copied','ok'));}
+async function regenTok(){
+  if(!confirm('Regenerate the API token? The current token stops working immediately — any backend using it must be updated.'))return;
+  try{const d=await api('POST','/api-token/regenerate');_apitok=d.token||'';
+    TOKEN=_apitok;sessionStorage.setItem('wgmgr_token',TOKEN); // panel bearer == API token: adopt the new one so we stay signed in
+    const el=$('#apitok');if(el){el.type='text';el.value=_apitok;}
+    toast('Token regenerated','ok');}
+  catch(e){toast(e.message,'err');}
+}
 async function doChangePassword(){
   const cur=$('#cp-cur').value, nw=$('#cp-new').value, cnf=$('#cp-cnf').value;
   if(!nw||nw.length<4){toast('New password must be at least 4 characters','err');return;}

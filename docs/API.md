@@ -9,7 +9,7 @@ backend.
 |---|---|
 | Base URL | `https://<SERVER_IP>:8443<base_path>` — the secret web path from `/etc/wgmgr/config.json` (`base_path`), printed at install. e.g. `https://1.2.3.4:8443/a1b2c3`. (Empty `base_path` = served at root.) |
 | Auth | header `Authorization: Bearer <API_TOKEN>`  (or `X-API-Token: <API_TOKEN>`) |
-| Token | in `/etc/wgmgr/config.json` on the server (`api_token`) |
+| Token | in `/etc/wgmgr/config.json` on the server (`api_token`); also viewable/regenerable from the panel's ⚙ Settings (regenerate invalidates the old token immediately) |
 | TLS | self-signed by default — pin the cert in your backend, or skip verification for testing |
 
 > **Call from your backend, not from browser JS** (no CORS headers are sent). The token is

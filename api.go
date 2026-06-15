@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -17,12 +18,14 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
 type api struct {
 	cfg Config
 	db  *sql.DB
+	mu  sync.RWMutex // guards cfg.APIToken (read on the request hot path by guard, written by regenerate); also serializes config-file writes from regenerate/change-password
 }
 
 func fileExists(p string) bool { _, err := os.Stat(p); return err == nil }
@@ -75,11 +78,13 @@ func startAPI(cfg Config, db *sql.DB) {
 		return
 	}
 	ensureCert(cfg)
-	a := &api{cfg, db}
+	a := &api{cfg: cfg, db: db}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", a.serveUI)
 	mux.HandleFunc("POST /login", a.login)
 	mux.HandleFunc("POST /change-password", a.guard(a.changePassword))
+	mux.HandleFunc("GET /api-token", a.guard(a.getAPIToken))
+	mux.HandleFunc("POST /api-token/regenerate", a.guard(a.regenAPIToken))
 	mux.HandleFunc("GET /peers/{name}/qr", a.guard(a.qrPeer))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok\n")) })
 	mux.HandleFunc("GET /peers", a.guard(a.listPeers))
@@ -126,7 +131,7 @@ func authOK(r *http.Request, token string) bool {
 // never crashes the daemon).
 func (a *api) guard(h func(http.ResponseWriter, *http.Request)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !authOK(r, a.cfg.APIToken) {
+		if !authOK(r, a.apiToken()) {
 			writeJSON(w, 401, map[string]any{"error": "unauthorized"})
 			return
 		}
@@ -141,6 +146,35 @@ func (a *api) guard(h func(http.ResponseWriter, *http.Request)) http.HandlerFunc
 		}()
 		h(w, r)
 	}
+}
+
+// apiToken reads cfg.APIToken under the lock — guard() calls it on every request while
+// regenAPIToken may be writing it concurrently.
+func (a *api) apiToken() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.cfg.APIToken
+}
+
+// getAPIToken returns the current full-admin API token to the (authenticated) panel.
+func (a *api) getAPIToken(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, 200, map[string]any{"token": a.apiToken()})
+}
+
+// regenAPIToken issues a fresh API token, persists it, and returns it. The panel sends
+// this same token as its own bearer, so it swaps to the new value on success and stays
+// logged in; any external integration using the old token must be updated.
+func (a *api) regenAPIToken(w http.ResponseWriter, r *http.Request) {
+	buf := make([]byte, 32)
+	rand.Read(buf)
+	newTok := hex.EncodeToString(buf)
+	a.mu.Lock()
+	cfg := loadConfig()
+	cfg.APIToken = newTok
+	saveConfig(cfg)
+	a.cfg.APIToken = newTok
+	a.mu.Unlock()
+	writeJSON(w, 200, map[string]any{"token": newTok})
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -346,9 +380,11 @@ func (a *api) changePassword(w http.ResponseWriter, r *http.Request) {
 		die("current password is incorrect")
 	}
 	newHash := hashPass(nw)
+	a.mu.Lock()
 	cfg := loadConfig()
 	cfg.AdminPassHash = newHash
 	saveConfig(cfg)
 	a.cfg.AdminPassHash = newHash
+	a.mu.Unlock()
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
