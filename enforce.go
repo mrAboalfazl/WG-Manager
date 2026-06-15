@@ -50,7 +50,11 @@ func b2i(b bool) int {
 	return 0
 }
 
-// effectiveBlocked: a peer is blocked if disabled, expired, or over quota.
+// usedTotal is a user's COMBINED usage across WireGuard and OpenVPN — the single number a
+// per-user quota is measured against (e.g. 20 GB over WG + 30 GB over OVPN = 50 GB).
+func usedTotal(p Peer) int64 { return p.UsedBytes + p.UsedOvpnBytes }
+
+// effectiveBlocked: a peer is blocked if disabled, expired, or over the combined quota.
 func effectiveBlocked(p Peer, now time.Time) bool {
 	if !p.Enabled {
 		return true
@@ -60,7 +64,7 @@ func effectiveBlocked(p Peer, now time.Time) bool {
 			return true
 		}
 	}
-	if p.QuotaBytes > 0 && p.UsedBytes >= p.QuotaBytes {
+	if p.QuotaBytes > 0 && usedTotal(p) >= p.QuotaBytes {
 		return true
 	}
 	return false
@@ -71,10 +75,12 @@ func effectiveBlocked(p Peer, now time.Time) bool {
 func enforceTick(db *sql.DB, cfg Config) {
 	ensureIPSet(cfg)
 	tr := wgTransfer(cfg.Interface)
+	ov := ovpnUsage(cfg.OvpnMgmt) // CN -> session bytes; empty map when OVPN is not configured
 	now := time.Now().UTC()
 	nowStr := now.Format(time.RFC3339)
 	for _, p := range allPeers(db) {
-		if cur, ok := tr[p.PublicKey]; ok {
+		// WireGuard usage (per pubkey; rx/tx counters reset when the interface restarts).
+		if cur, ok := tr[p.PublicKey]; ok && p.PublicKey != "" {
 			rx, tx := cur[0], cur[1]
 			drx := rx - p.LastRx
 			if rx < p.LastRx { // counter reset (reboot / peer re-add)
@@ -89,11 +95,31 @@ func enforceTick(db *sql.DB, cfg Config) {
 			db.Exec("UPDATE peers SET used_bytes=?,last_rx=?,last_tx=?,updated_at=? WHERE id=?",
 				p.UsedBytes, rx, tx, nowStr, p.ID)
 		}
+		// OpenVPN usage (per CN; single byte counter resets on reconnect).
+		if p.OvpnCN != "" {
+			if cur, ok := ov[p.OvpnCN]; ok {
+				d := cur - p.LastOvpnBytes
+				if cur < p.LastOvpnBytes { // reconnect -> counter reset
+					d = cur
+				}
+				p.UsedOvpnBytes += d
+				p.LastOvpnBytes = cur
+				db.Exec("UPDATE peers SET used_ovpn_bytes=?,last_ovpn_bytes=?,updated_at=? WHERE id=?",
+					p.UsedOvpnBytes, cur, nowStr, p.ID)
+			}
+		}
+		// Combined-quota enforcement: when over the shared cap, block BOTH tunnel IPs in
+		// the one ipset (the FORWARD drop is interface-agnostic, so it covers wg0 and tun0).
 		blocked := effectiveBlocked(p, now)
-		if blocked {
-			run("ipset", "add", cfg.IPSet, p.Address, "-exist")
-		} else {
-			run("ipset", "del", cfg.IPSet, p.Address)
+		for _, ip := range []string{p.Address, p.OvpnIP} {
+			if ip == "" {
+				continue
+			}
+			if blocked {
+				run("ipset", "add", cfg.IPSet, ip, "-exist")
+			} else {
+				run("ipset", "del", cfg.IPSet, ip)
+			}
 		}
 		if blocked != p.Blocked {
 			db.Exec("UPDATE peers SET blocked=? WHERE id=?", b2i(blocked), p.ID)

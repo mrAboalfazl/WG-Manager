@@ -43,6 +43,7 @@ type Config struct {
 	IPSet         string `json:"ipset_name"`
 	AdminUser     string `json:"admin_user"`
 	AdminPassHash string `json:"admin_pass_hash"`
+	OvpnMgmt      string `json:"ovpn_mgmt"` // OpenVPN management address (unix:/path or host:port); "" = OVPN usage tracking off
 }
 
 type Peer struct {
@@ -59,6 +60,12 @@ type Peer struct {
 	ExpiresAt  string // ISO-8601 UTC, "" = never
 	Enabled    bool
 	Blocked    bool
+	// OpenVPN identity + usage — a user's quota is the COMBINED WG+OVPN total.
+	OvpnCN        string // OpenVPN common name (= username); "" if the user has no OVPN identity
+	OvpnIP        string // OpenVPN tunnel IP (static, via CCD) — blocked in the same ipset as the WG IP
+	OvpnEnabled   bool
+	UsedOvpnBytes int64
+	LastOvpnBytes int64 // last cumulative OVPN session bytes, for delta carry-over
 }
 
 type dieError struct{ msg string }
@@ -168,20 +175,33 @@ func openDB(path string) *sql.DB {
 	if _, err := db.Exec(schema); err != nil {
 		die("migrate: %v", err)
 	}
+	// Additive migrations for OpenVPN identity + per-protocol usage (idempotent — the
+	// ALTER fails harmlessly with "duplicate column name" once the column exists).
+	for _, col := range []string{
+		"ovpn_cn TEXT DEFAULT ''",
+		"ovpn_ip TEXT DEFAULT ''",
+		"ovpn_enabled INTEGER NOT NULL DEFAULT 0",
+		"used_ovpn_bytes INTEGER NOT NULL DEFAULT 0",
+		"last_ovpn_bytes INTEGER NOT NULL DEFAULT 0",
+	} {
+		db.Exec("ALTER TABLE peers ADD COLUMN " + col)
+	}
 	return db
 }
 
 func scanPeer(rows interface{ Scan(...interface{}) error }) (Peer, error) {
 	var p Peer
-	var enabled, blocked int
+	var enabled, blocked, ovpnEnabled int
 	err := rows.Scan(&p.ID, &p.Username, &p.PublicKey, &p.PrivateKey, &p.PSK, &p.Address,
-		&p.QuotaBytes, &p.UsedBytes, &p.LastRx, &p.LastTx, &p.ExpiresAt, &enabled, &blocked)
+		&p.QuotaBytes, &p.UsedBytes, &p.LastRx, &p.LastTx, &p.ExpiresAt, &enabled, &blocked,
+		&p.OvpnCN, &p.OvpnIP, &ovpnEnabled, &p.UsedOvpnBytes, &p.LastOvpnBytes)
 	p.Enabled = enabled != 0
 	p.Blocked = blocked != 0
+	p.OvpnEnabled = ovpnEnabled != 0
 	return p, err
 }
 
-const peerCols = "id,username,public_key,private_key,preshared_key,address,quota_bytes,used_bytes,last_rx,last_tx,expires_at,enabled,blocked"
+const peerCols = "id,username,public_key,private_key,preshared_key,address,quota_bytes,used_bytes,last_rx,last_tx,expires_at,enabled,blocked,ovpn_cn,ovpn_ip,ovpn_enabled,used_ovpn_bytes,last_ovpn_bytes"
 
 func allPeers(db *sql.DB) []Peer {
 	rows, err := db.Query("SELECT " + peerCols + " FROM peers ORDER BY id")
