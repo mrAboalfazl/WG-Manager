@@ -57,6 +57,34 @@ C
   say "WireGuard up: ${IFACE} udp/${port}, subnet ${subnet}, egress ${nic}, public ${pubip}"
 }
 
+# Optional: add OpenVPN alongside WireGuard (set INSTALL_OVPN=1). Users then get a single
+# COMBINED quota across both protocols via `wgmgr ovpn-add <user>`. Overrides: OVPN_PORT /
+# OVPN_PROTO / OVPN_SUBNET / OVPN_ENDPOINT. (Generated here; validate on a real server.)
+bootstrap_openvpn(){
+  [ "${INSTALL_OVPN:-0}" = "1" ] || return 0
+  command -v openvpn >/dev/null 2>&1 || { err "openvpn not installed; skipping OVPN setup"; return 0; }
+  say "setting up OpenVPN (combined-quota with WireGuard)…"
+  local nic; nic="$(ip -4 route ls default 2>/dev/null | awk '{print $5; exit}')"
+  local subnet="${OVPN_SUBNET:-10.8.0.0/24}"
+  mkdir -p /run/wgmgr
+  printf 'd /run/wgmgr 0755 root root -\n' > /etc/tmpfiles.d/wgmgr.conf
+  "${PREFIX}/wgmgr" ovpn-init ${OVPN_PORT:+--port "$OVPN_PORT"} ${OVPN_PROTO:+--proto "$OVPN_PROTO"} \
+    ${OVPN_SUBNET:+--subnet "$OVPN_SUBNET"} ${OVPN_ENDPOINT:+--endpoint "$OVPN_ENDPOINT"} \
+    || { err "wgmgr ovpn-init failed; skipping"; return 0; }
+  sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
+  # NAT + forward for the OVPN subnet. APPEND (-A) the ACCEPTs so they sit BELOW wgmgr's
+  # position-1 ipset DROP rule — a blocked user must be dropped before being accepted.
+  iptables -t nat -C POSTROUTING -s "$subnet" -o "$nic" -j MASQUERADE 2>/dev/null \
+    || iptables -t nat -A POSTROUTING -s "$subnet" -o "$nic" -j MASQUERADE
+  iptables -C FORWARD -s "$subnet" -j ACCEPT 2>/dev/null || iptables -A FORWARD -s "$subnet" -j ACCEPT
+  iptables -C FORWARD -d "$subnet" -j ACCEPT 2>/dev/null || iptables -A FORWARD -d "$subnet" -j ACCEPT
+  ( netfilter-persistent save || iptables-save > /etc/iptables/rules.v4 ) >/dev/null 2>&1 \
+    || say "note: persist iptables yourself so the OVPN NAT survives reboot"
+  systemctl enable --now openvpn@server >/dev/null 2>&1 || systemctl restart openvpn@server >/dev/null 2>&1 || true
+  systemctl restart wgmgr.service >/dev/null 2>&1 || true  # reload config so the enforce loop reads ovpn_mgmt
+  say "OpenVPN up: proto $(awk '/^proto/{print $2}' /etc/openvpn/server.conf) port $(awk '/^port/{print $2}' /etc/openvpn/server.conf) subnet ${subnet}"
+}
+
 [ "$(id -u)" = 0 ] || { err "please run as root"; exit 1; }
 
 case "$(uname -m)" in
@@ -65,10 +93,12 @@ case "$(uname -m)" in
   *) err "unsupported arch: $(uname -m)"; exit 1;;
 esac
 
-say "installing dependencies (ipset, wireguard-tools)…"
+OVPN_PKG=""
+[ "${INSTALL_OVPN:-0}" = "1" ] && OVPN_PKG="openvpn"
+say "installing dependencies (ipset, wireguard-tools${OVPN_PKG:+, openvpn})…"
 if command -v apt-get >/dev/null 2>&1; then
   apt-get update -qq || true
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ipset wireguard-tools curl >/dev/null 2>&1 || true
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ipset wireguard-tools curl $OVPN_PKG >/dev/null 2>&1 || true
 fi
 command -v wg >/dev/null 2>&1 || { err "wireguard-tools (wg) not found — set up WireGuard first."; exit 1; }
 
@@ -125,6 +155,8 @@ UNIT
 systemctl daemon-reload
 systemctl enable --now wgmgr.service
 
+bootstrap_openvpn
+
 IP="$(curl -fsS --max-time 5 https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')"
 # secret web base path the panel/API are served under (empty when upgrading a pre-base-path install)
 BASE="$(sed -n 's/.*"base_path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' /etc/wgmgr/config.json 2>/dev/null)"
@@ -132,3 +164,4 @@ say "done ✅"
 say "Panel:  https://${IP}:8443${BASE}/   (login = admin / the password printed above)"
 say "API:    base https://${IP}:8443${BASE}  ·  token in /etc/wgmgr/config.json  ·  docs: https://github.com/${REPO}/blob/main/docs/API.md"
 say "CLI:    wgmgr list | add <user> --quota-gb N --days D | set-login <user> <pass> | set-base-path </p>"
+[ "${INSTALL_OVPN:-0}" = "1" ] && say "OpenVPN: wgmgr ovpn-add <user> → profile: wgmgr ovpn-config <user>  (counts toward the SAME quota as WireGuard)"

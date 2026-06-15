@@ -44,6 +44,12 @@ type Config struct {
 	AdminUser     string `json:"admin_user"`
 	AdminPassHash string `json:"admin_pass_hash"`
 	OvpnMgmt      string `json:"ovpn_mgmt"` // OpenVPN management address (unix:/path or host:port); "" = OVPN usage tracking off
+	OvpnDir       string `json:"ovpn_dir"`
+	OvpnSubnet    string `json:"ovpn_subnet"`
+	OvpnPort      string `json:"ovpn_port"`
+	OvpnProto     string `json:"ovpn_proto"`
+	OvpnEndpoint  string `json:"ovpn_endpoint"` // public host clients dial (defaults to SERVER_PUB_IP)
+	OvpnDNS       string `json:"ovpn_dns"`
 }
 
 type Peer struct {
@@ -65,7 +71,9 @@ type Peer struct {
 	OvpnIP        string // OpenVPN tunnel IP (static, via CCD) — blocked in the same ipset as the WG IP
 	OvpnEnabled   bool
 	UsedOvpnBytes int64
-	LastOvpnBytes int64 // last cumulative OVPN session bytes, for delta carry-over
+	LastOvpnBytes int64  // last cumulative OVPN session bytes, for delta carry-over
+	OvpnCert      string // client cert PEM (stored so the .ovpn can be re-emitted)
+	OvpnKey       string // client key PEM
 }
 
 type dieError struct{ msg string }
@@ -183,6 +191,8 @@ func openDB(path string) *sql.DB {
 		"ovpn_enabled INTEGER NOT NULL DEFAULT 0",
 		"used_ovpn_bytes INTEGER NOT NULL DEFAULT 0",
 		"last_ovpn_bytes INTEGER NOT NULL DEFAULT 0",
+		"ovpn_cert TEXT DEFAULT ''",
+		"ovpn_key TEXT DEFAULT ''",
 	} {
 		db.Exec("ALTER TABLE peers ADD COLUMN " + col)
 	}
@@ -194,14 +204,14 @@ func scanPeer(rows interface{ Scan(...interface{}) error }) (Peer, error) {
 	var enabled, blocked, ovpnEnabled int
 	err := rows.Scan(&p.ID, &p.Username, &p.PublicKey, &p.PrivateKey, &p.PSK, &p.Address,
 		&p.QuotaBytes, &p.UsedBytes, &p.LastRx, &p.LastTx, &p.ExpiresAt, &enabled, &blocked,
-		&p.OvpnCN, &p.OvpnIP, &ovpnEnabled, &p.UsedOvpnBytes, &p.LastOvpnBytes)
+		&p.OvpnCN, &p.OvpnIP, &ovpnEnabled, &p.UsedOvpnBytes, &p.LastOvpnBytes, &p.OvpnCert, &p.OvpnKey)
 	p.Enabled = enabled != 0
 	p.Blocked = blocked != 0
 	p.OvpnEnabled = ovpnEnabled != 0
 	return p, err
 }
 
-const peerCols = "id,username,public_key,private_key,preshared_key,address,quota_bytes,used_bytes,last_rx,last_tx,expires_at,enabled,blocked,ovpn_cn,ovpn_ip,ovpn_enabled,used_ovpn_bytes,last_ovpn_bytes"
+const peerCols = "id,username,public_key,private_key,preshared_key,address,quota_bytes,used_bytes,last_rx,last_tx,expires_at,enabled,blocked,ovpn_cn,ovpn_ip,ovpn_enabled,used_ovpn_bytes,last_ovpn_bytes,ovpn_cert,ovpn_key"
 
 func allPeers(db *sql.DB) []Peer {
 	rows, err := db.Query("SELECT " + peerCols + " FROM peers ORDER BY id")
@@ -713,7 +723,7 @@ func main() {
 		}
 	}()
 	if len(os.Args) < 2 {
-		fmt.Println("wgmgr <init|import|add|rm|list|show|config|set-quota|renew|enable|disable|render|serve|set-login|set-base-path> ...")
+		fmt.Println("wgmgr <init|import|add|rm|list|show|config|set-quota|renew|enable|disable|render|serve|set-login|set-base-path|ovpn-init|ovpn-add|ovpn-config|ovpn-rm> ...")
 		os.Exit(1)
 	}
 	cmd := os.Args[1]
@@ -770,6 +780,14 @@ func main() {
 			fmt.Printf("panel base path set to %s — restart wgmgr to apply.\n", cfg.BasePath)
 		}
 		fmt.Printf("panel URL: https://%s%s%s/\n", pm["SERVER_PUB_IP"], cfg.APIListen, cfg.BasePath)
+	case "ovpn-init":
+		cmdOvpnInit(args)
+	case "ovpn-add":
+		cmdOvpnAdd(args)
+	case "ovpn-config":
+		cmdOvpnConfig(args)
+	case "ovpn-rm":
+		cmdOvpnRm(args)
 	case "set-quota":
 		setField(args, "usage: wgmgr set-quota <username> <GB>", func(db *sql.DB, p Peer, cfg Config) {
 			if len(args) < 2 {
