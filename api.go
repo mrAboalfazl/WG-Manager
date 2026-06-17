@@ -97,6 +97,9 @@ func startAPI(cfg Config, db *sql.DB) {
 	mux.HandleFunc("POST /peers/{name}/quota", a.guard(a.setQuota))
 	mux.HandleFunc("POST /peers/{name}/enable", a.guard(a.enableH))
 	mux.HandleFunc("POST /peers/{name}/disable", a.guard(a.disableH))
+	mux.HandleFunc("POST /peers/{name}/ovpn", a.guard(a.ovpnAddH))
+	mux.HandleFunc("GET /peers/{name}/ovpn-config", a.guard(a.ovpnConfigH))
+	mux.HandleFunc("DELETE /peers/{name}/ovpn", a.guard(a.ovpnRemoveH))
 	// Mount everything under the configured web base path (e.g. /a1b2c3). Empty base =
 	// root = unchanged behavior. Outside the prefix nothing is registered, so the bare
 	// root 404s and the panel is dark to scanners hitting IP:PORT/.
@@ -199,13 +202,20 @@ func peerJSON(p Peer) map[string]any {
 		"username":   p.Username,
 		"address":    p.Address,
 		"public_key": p.PublicKey,
-		"used_bytes": p.UsedBytes,
+		"used_bytes": p.UsedBytes, // WireGuard
 		"used_gb":    bytesToGB(p.UsedBytes),
+		"used_ovpn_bytes":  p.UsedOvpnBytes,
+		"used_ovpn_gb":     bytesToGB(p.UsedOvpnBytes),
+		"used_total_bytes": p.UsedBytes + p.UsedOvpnBytes, // WG + OVPN = what the quota measures
+		"used_total_gb":    bytesToGB(p.UsedBytes + p.UsedOvpnBytes),
 		"quota_bytes": p.QuotaBytes,
 		"quota_gb":   bytesToGB(p.QuotaBytes),
 		"expires_at": p.ExpiresAt,
 		"enabled":    p.Enabled,
 		"blocked":    p.Blocked,
+		"has_ovpn":     p.OvpnCN != "",
+		"ovpn_enabled": p.OvpnEnabled,
+		"ovpn_ip":      p.OvpnIP,
 	}
 }
 
@@ -365,6 +375,43 @@ func (a *api) disableH(w http.ResponseWriter, r *http.Request) {
 	p := a.mustPeer(r)
 	a.db.Exec("UPDATE peers SET enabled=0,updated_at=? WHERE id=?", nowUTC(), p.ID)
 	writeJSON(w, 200, peerJSON(a.mustPeer(r)))
+}
+
+// ovpnAddH attaches an OpenVPN identity to a user and returns the .ovpn. loadConfig() is
+// read fresh so it picks up an `ovpn-init` that happened after the daemon started.
+func (a *api) ovpnAddH(w http.ResponseWriter, r *http.Request) {
+	cfg := loadConfig()
+	ovpnDefaults(&cfg)
+	if !fileExists(filepath.Join(cfg.OvpnDir, "ca.crt")) {
+		die("OpenVPN is not set up on this server yet (run `wgmgr ovpn-init`)")
+	}
+	p := a.mustPeer(r)
+	if p.OvpnCN != "" {
+		die("user %q already has an OpenVPN identity", p.Username)
+	}
+	ip := ovpnAttach(a.db, cfg, p)
+	p, _ = getPeer(a.db, p.Username)
+	writeJSON(w, 201, map[string]any{"ovpn_ip": ip, "client_config": ovpnConfigForPeer(cfg, p)})
+}
+
+// ovpnConfigH returns a user's .ovpn profile as text/plain.
+func (a *api) ovpnConfigH(w http.ResponseWriter, r *http.Request) {
+	cfg := loadConfig()
+	ovpnDefaults(&cfg)
+	p := a.mustPeer(r)
+	if p.OvpnCN == "" || p.OvpnCert == "" {
+		die("user %q has no OpenVPN identity", p.Username)
+	}
+	w.Header().Set("Content-Type", "text/plain")
+	w.Write([]byte(ovpnConfigForPeer(cfg, p)))
+}
+
+// ovpnRemoveH detaches a user's OpenVPN identity.
+func (a *api) ovpnRemoveH(w http.ResponseWriter, r *http.Request) {
+	cfg := loadConfig()
+	ovpnDefaults(&cfg)
+	ovpnDetach(a.db, cfg, a.mustPeer(r))
+	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
 // changePassword updates the panel/admin password (verifies the current one first).

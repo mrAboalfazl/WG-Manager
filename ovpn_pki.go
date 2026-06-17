@@ -279,6 +279,39 @@ func ovpnDefaults(cfg *Config) {
 	}
 }
 
+// ovpnAttach mints a client cert + static IP + CCD for an existing user and records the
+// OpenVPN identity in the DB. Returns the assigned IP. Shared by the CLI and the panel API;
+// the caller must ensure OVPN is initialized and the user has no existing OVPN identity.
+func ovpnAttach(db *sql.DB, cfg Config, p Peer) string {
+	ca, caKey := ovpnEnsureCA(cfg.OvpnDir)
+	certPEM, keyPEM := ovpnIssueCert(ca, caKey, p.Username, false)
+	ip := ovpnNextFreeIP(db, cfg.OvpnSubnet)
+	writeFileMode(filepath.Join(cfg.OvpnDir, "ccd", p.Username),
+		fmt.Sprintf("ifconfig-push %s %s\n", ip, ovpnMask(cfg.OvpnSubnet)), 0o644)
+	if _, err := db.Exec("UPDATE peers SET ovpn_cn=?,ovpn_ip=?,ovpn_enabled=1,ovpn_cert=?,ovpn_key=?,updated_at=? WHERE id=?",
+		p.Username, ip, certPEM, keyPEM, nowUTC(), p.ID); err != nil {
+		die("ovpn attach: %v", err)
+	}
+	return ip
+}
+
+// ovpnDetach removes a user's OpenVPN identity: drops the CCD file (ccd-exclusive then
+// blocks reconnects) and clears the OVPN fields + usage in the DB.
+func ovpnDetach(db *sql.DB, cfg Config, p Peer) {
+	os.Remove(filepath.Join(cfg.OvpnDir, "ccd", p.Username))
+	if _, err := db.Exec("UPDATE peers SET ovpn_cn='',ovpn_ip='',ovpn_enabled=0,ovpn_cert='',ovpn_key='',used_ovpn_bytes=0,last_ovpn_bytes=0,updated_at=? WHERE id=?",
+		nowUTC(), p.ID); err != nil {
+		die("ovpn detach: %v", err)
+	}
+}
+
+// ovpnConfigForPeer renders a user's .ovpn (CA + tls-crypt from disk, client cert/key from DB).
+func ovpnConfigForPeer(cfg Config, p Peer) string {
+	caPEM := readFileStr(filepath.Join(cfg.OvpnDir, "ca.crt"))
+	tcPEM := readFileStr(filepath.Join(cfg.OvpnDir, "tc.key"))
+	return ovpnClientConfig(cfg, caPEM, p.OvpnCert, p.OvpnKey, tcPEM)
+}
+
 // ---------- CLI commands ----------
 
 // cmdOvpnInit sets up the OpenVPN server: PKI (CA + server cert + tls-crypt), the CCD dir,
@@ -346,15 +379,7 @@ func cmdOvpnAdd(args []string) {
 	if p.OvpnCN != "" {
 		die("user %q already has an OpenVPN identity", p.Username)
 	}
-	ca, caKey := ovpnEnsureCA(cfg.OvpnDir)
-	certPEM, keyPEM := ovpnIssueCert(ca, caKey, p.Username, false)
-	ip := ovpnNextFreeIP(db, cfg.OvpnSubnet)
-	writeFileMode(filepath.Join(cfg.OvpnDir, "ccd", p.Username),
-		fmt.Sprintf("ifconfig-push %s %s\n", ip, ovpnMask(cfg.OvpnSubnet)), 0o644)
-	if _, err := db.Exec("UPDATE peers SET ovpn_cn=?,ovpn_ip=?,ovpn_enabled=1,ovpn_cert=?,ovpn_key=?,updated_at=? WHERE id=?",
-		p.Username, ip, certPEM, keyPEM, nowUTC(), p.ID); err != nil {
-		die("ovpn-add: %v", err)
-	}
+	ip := ovpnAttach(db, cfg, p)
 	fmt.Printf("openvpn identity added for %s (ip %s). Get the profile: wgmgr ovpn-config %s\n", p.Username, ip, p.Username)
 }
 
@@ -374,9 +399,7 @@ func cmdOvpnConfig(args []string) {
 	if p.OvpnCN == "" || p.OvpnCert == "" {
 		die("user %q has no OpenVPN identity — run `wgmgr ovpn-add %s`", args[0], args[0])
 	}
-	caPEM := readFileStr(filepath.Join(cfg.OvpnDir, "ca.crt"))
-	tcPEM := readFileStr(filepath.Join(cfg.OvpnDir, "tc.key"))
-	fmt.Print(ovpnClientConfig(cfg, caPEM, p.OvpnCert, p.OvpnKey, tcPEM))
+	fmt.Print(ovpnConfigForPeer(cfg, p))
 }
 
 // cmdOvpnRm detaches a user's OpenVPN identity: removes their CCD file (with ccd-exclusive
@@ -393,10 +416,6 @@ func cmdOvpnRm(args []string) {
 	if !ok {
 		die("no such user %q", args[0])
 	}
-	os.Remove(filepath.Join(cfg.OvpnDir, "ccd", p.Username))
-	if _, err := db.Exec("UPDATE peers SET ovpn_cn='',ovpn_ip='',ovpn_enabled=0,ovpn_cert='',ovpn_key='',used_ovpn_bytes=0,last_ovpn_bytes=0,updated_at=? WHERE id=?",
-		nowUTC(), p.ID); err != nil {
-		die("ovpn-rm: %v", err)
-	}
+	ovpnDetach(db, cfg, p)
 	fmt.Printf("openvpn identity removed for %s\n", p.Username)
 }

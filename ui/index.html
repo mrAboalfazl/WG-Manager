@@ -193,11 +193,12 @@ function render(){
   $('#s-total').textContent=PEERS.length;
   $('#s-online').textContent=PEERS.filter(p=>p.online).length;
   $('#s-blocked').textContent=PEERS.filter(p=>p.blocked).length;
-  $('#s-usage').textContent=fmtGB(PEERS.reduce((a,p)=>a+(+p.used_gb||0),0));
+  $('#s-usage').textContent=fmtGB(PEERS.reduce((a,p)=>a+(+p.used_total_gb||+p.used_gb||0),0));
   const rows=$('#rows');rows.innerHTML='';
   $('#empty').classList.toggle('hidden',list.length>0);
   for(const p of list){
-    const pct=p.quota_gb>0?Math.min(100,Math.round(p.used_gb/p.quota_gb*100)):0;
+    const used=(+p.used_total_gb)||(+p.used_gb)||0;
+    const pct=p.quota_gb>0?Math.min(100,Math.round(used/p.quota_gb*100)):0;
     const hi=pct>=85?'hi':'';
     const dl=daysLeft(p.expires_at);
     const exp=p.expires_at?(dl<0?'<span style="color:var(--bad)">expired</span>':dl+' days'):'never';
@@ -207,7 +208,8 @@ function render(){
     const tr=document.createElement('tr');
     tr.innerHTML=`
       <td><div class="uname">${esc(p.username)}</div><div class="ip">${p.address}</div></td>
-      <td><div class="use"><b>${fmtGB(p.used_gb)}</b> / ${quota}</div>
+      <td><div class="use"><b>${fmtGB(used)}</b> / ${quota}</div>
+        ${p.has_ovpn?`<div class="ip">WG ${fmtGB(p.used_gb)} · OVPN ${fmtGB(p.used_ovpn_gb)}</div>`:''}
         ${p.quota_gb>0?`<div class="bar"><i class="${hi}" style="width:${pct}%"></i></div>`:''}</td>
       <td class="hide-sm">${exp}</td>
       <td>${status}</td>
@@ -215,6 +217,7 @@ function render(){
         <button class="btn ghost sm" onclick="showQR('${enc(p.username)}')" title="Config & QR">Config</button>
         <button class="btn ghost sm" onclick="openRecharge('${enc(p.username)}')" title="Data / quota">Data</button>
         <button class="btn ghost sm" onclick="openRenew('${enc(p.username)}')" title="Extend time">Renew</button>
+        <button class="btn ghost sm" onclick="ovpnAction('${enc(p.username)}',${p.has_ovpn})" title="OpenVPN profile">${p.has_ovpn?'OVPN':'+OVPN'}</button>
         <button class="btn ghost sm" onclick="toggle('${enc(p.username)}',${p.enabled})">${p.enabled?'Disable':'Enable'}</button>
         <button class="btn danger sm" onclick="del('${enc(p.username)}')">Delete</button>
       </div></td>`;
@@ -347,6 +350,28 @@ async function qrModal(u,cfg){
 function copyCfg(){navigator.clipboard.writeText(window._cfg||'').then(()=>toast('Copied','ok'));}
 function dlCfg(u){const b=new Blob([window._cfg||''],{type:'text/plain'});const a=document.createElement('a');
   a.href=URL.createObjectURL(b);a.download=u+'.conf';a.click();}
+
+// OpenVPN: add an identity (counts toward the same quota as WG), download/remove its .ovpn.
+async function ovpnAction(u,has){
+  try{
+    let cfg;
+    if(has){ cfg=await api('GET','/peers/'+encodeURIComponent(u)+'/ovpn-config'); }
+    else{ const r=await api('POST','/peers/'+encodeURIComponent(u)+'/ovpn'); cfg=r.client_config; toast('OpenVPN added','ok'); refresh(); }
+    ovpnModal(u,cfg);
+  }catch(e){ toast(e.message,'err'); }
+}
+function ovpnModal(u,cfg){
+  modal(`<h3>${esc(u)} · OpenVPN</h3><p class="sub">Import this .ovpn into an OpenVPN client. Usage counts toward the same quota as WireGuard.</p>
+    <pre>${esc(cfg||'')}</pre>
+    <div class="row"><button class="btn ghost" onclick="dlOvpn('${enc(u)}')">Download .ovpn</button>
+    <button class="btn danger" onclick="rmOvpn('${enc(u)}')">Remove</button>
+    <button class="btn" onclick="closeModal()">Done</button></div>`);
+  window._ovpn=cfg||'';
+}
+function dlOvpn(u){const b=new Blob([window._ovpn||''],{type:'text/plain'});const a=document.createElement('a');
+  a.href=URL.createObjectURL(b);a.download=u+'.ovpn';a.click();}
+async function rmOvpn(u){ if(!confirm('Remove OpenVPN access for "'+u+'"?'))return;
+  try{ await api('DELETE','/peers/'+encodeURIComponent(u)+'/ovpn'); toast('OpenVPN removed','ok'); closeModal(); refresh(); }catch(e){ toast(e.message,'err'); } }
 
 // boot
 if(TOKEN){api('GET','/peers').then(showApp).catch(()=>logout());}
