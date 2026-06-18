@@ -340,7 +340,9 @@ func cmdOvpnInit(args []string) {
 		cfg.OvpnEndpoint = parseParams(cfg.Params)["SERVER_PUB_IP"]
 	}
 
-	os.MkdirAll(filepath.Join(cfg.OvpnDir, "ccd"), 0o700)
+	// 0755: OpenVPN reads CCD files at connect time AFTER dropping to user 'nobody', so the
+	// dir must be traversable by non-root or `ccd-exclusive` rejects every client (AUTH_FAILED).
+	os.MkdirAll(filepath.Join(cfg.OvpnDir, "ccd"), 0o755)
 	ca, caKey := ovpnEnsureCA(cfg.OvpnDir)
 	srvCrt, srvKey := filepath.Join(cfg.OvpnDir, "server.crt"), filepath.Join(cfg.OvpnDir, "server.key")
 	if !(fileExists(srvCrt) && fileExists(srvKey)) {
