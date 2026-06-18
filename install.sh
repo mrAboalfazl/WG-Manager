@@ -80,7 +80,16 @@ bootstrap_openvpn(){
   iptables -C FORWARD -d "$subnet" -j ACCEPT 2>/dev/null || iptables -A FORWARD -d "$subnet" -j ACCEPT
   ( netfilter-persistent save || iptables-save > /etc/iptables/rules.v4 ) >/dev/null 2>&1 \
     || say "note: persist iptables yourself so the OVPN NAT survives reboot"
-  systemctl enable --now openvpn@server >/dev/null 2>&1 || systemctl restart openvpn@server >/dev/null 2>&1 || true
+  # Ubuntu's canonical unit is openvpn-server@server (reads /etc/openvpn/server/server.conf);
+  # fall back to the legacy openvpn@server (reads /etc/openvpn/server.conf). Verified on 22.04.
+  mkdir -p /etc/openvpn/server
+  cp -f /etc/openvpn/server.conf /etc/openvpn/server/server.conf
+  if systemctl enable --now openvpn-server@server 2>/dev/null && systemctl is-active --quiet openvpn-server@server; then
+    say "OpenVPN service: openvpn-server@server"
+  else
+    systemctl enable --now openvpn@server >/dev/null 2>&1 || true
+    say "OpenVPN service: openvpn@server (legacy)"
+  fi
   systemctl restart wgmgr.service >/dev/null 2>&1 || true  # reload config so the enforce loop reads ovpn_mgmt
   say "OpenVPN up: proto $(awk '/^proto/{print $2}' /etc/openvpn/server.conf) port $(awk '/^port/{print $2}' /etc/openvpn/server.conf) subnet ${subnet}"
 }
