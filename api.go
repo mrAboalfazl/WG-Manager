@@ -283,6 +283,25 @@ func (a *api) createPeer(w http.ResponseWriter, r *http.Request) {
 	if v, ok := m["days"].(float64); ok && v > 0 {
 		expires = time.Now().UTC().AddDate(0, 0, int(v)).Format(time.RFC3339)
 	}
+	// OpenVPN-only user (no WireGuard identity): {"ovpn_only": true}
+	if oo, _ := m["ovpn_only"].(bool); oo {
+		cfg := loadConfig()
+		ovpnDefaults(&cfg)
+		if !fileExists(filepath.Join(cfg.OvpnDir, "ca.crt")) {
+			die("OpenVPN is not set up on this server yet (run `wgmgr ovpn-init`)")
+		}
+		if _, err := a.db.Exec(`INSERT INTO peers(username,public_key,private_key,preshared_key,address,quota_bytes,expires_at,enabled,created_at,updated_at)
+			VALUES(?,'','','','',?,?,1,?,?)`, username, quota, expires, nowUTC(), nowUTC()); err != nil {
+			die("insert: %v", err)
+		}
+		p, _ := getPeer(a.db, username)
+		ovpnAttach(a.db, cfg, p)
+		p, _ = getPeer(a.db, username)
+		resp := peerJSON(p)
+		resp["client_config"] = ovpnConfigForPeer(cfg, p)
+		writeJSON(w, 201, resp)
+		return
+	}
 	priv, pub, psk := genKeys()
 	ip := nextFreeIP(a.db, a.cfg.WGConf)
 	if _, err := a.db.Exec(`INSERT INTO peers(username,public_key,private_key,preshared_key,address,quota_bytes,expires_at,enabled,created_at,updated_at)

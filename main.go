@@ -164,10 +164,10 @@ func openDB(path string) *sql.DB {
 	schema := `CREATE TABLE IF NOT EXISTS peers(
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		username TEXT UNIQUE NOT NULL,
-		public_key TEXT UNIQUE NOT NULL,
+		public_key TEXT NOT NULL DEFAULT '',
 		private_key TEXT DEFAULT '',
 		preshared_key TEXT DEFAULT '',
-		address TEXT UNIQUE NOT NULL,
+		address TEXT NOT NULL DEFAULT '',
 		quota_bytes INTEGER NOT NULL DEFAULT 0,
 		used_bytes INTEGER NOT NULL DEFAULT 0,
 		last_rx INTEGER NOT NULL DEFAULT 0,
@@ -196,7 +196,69 @@ func openDB(path string) *sql.DB {
 	} {
 		db.Exec("ALTER TABLE peers ADD COLUMN " + col)
 	}
+	// Phase 5: relax public_key/address (drop the inline UNIQUE NOT NULL) so OVPN-only users
+	// — with no WireGuard identity — can exist. Tables created with the old constraints get
+	// rebuilt once, transactionally; fresh tables already use the relaxed schema above.
+	// Uniqueness is then enforced only for NON-empty keys/IPs via partial indexes.
+	var peersSQL string
+	db.QueryRow("SELECT sql FROM sqlite_master WHERE type='table' AND name='peers'").Scan(&peersSQL)
+	if strings.Contains(peersSQL, "public_key TEXT UNIQUE") || strings.Contains(peersSQL, "address TEXT UNIQUE") {
+		migratePeersRelaxWG(db)
+	}
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_peers_pubkey ON peers(public_key) WHERE public_key != ''")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_peers_addr ON peers(address) WHERE address != ''")
 	return db
+}
+
+// migratePeersRelaxWG rebuilds the peers table dropping the inline UNIQUE NOT NULL on
+// public_key/address (so OVPN-only users can keep them empty), preserving every row.
+// Transactional: any failure rolls back with the original table intact.
+func migratePeersRelaxWG(db *sql.DB) {
+	cols := "id,username,public_key,private_key,preshared_key,address,quota_bytes,used_bytes," +
+		"last_rx,last_tx,expires_at,enabled,blocked,created_at,updated_at,notes," +
+		"ovpn_cn,ovpn_ip,ovpn_enabled,used_ovpn_bytes,last_ovpn_bytes,ovpn_cert,ovpn_key"
+	tx, err := db.Begin()
+	if err != nil {
+		die("phase5 migrate: begin: %v", err)
+	}
+	for _, s := range []string{
+		`CREATE TABLE peers_new(
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			username TEXT UNIQUE NOT NULL,
+			public_key TEXT NOT NULL DEFAULT '',
+			private_key TEXT DEFAULT '',
+			preshared_key TEXT DEFAULT '',
+			address TEXT NOT NULL DEFAULT '',
+			quota_bytes INTEGER NOT NULL DEFAULT 0,
+			used_bytes INTEGER NOT NULL DEFAULT 0,
+			last_rx INTEGER NOT NULL DEFAULT 0,
+			last_tx INTEGER NOT NULL DEFAULT 0,
+			expires_at TEXT DEFAULT '',
+			enabled INTEGER NOT NULL DEFAULT 1,
+			blocked INTEGER NOT NULL DEFAULT 0,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			notes TEXT DEFAULT '',
+			ovpn_cn TEXT DEFAULT '',
+			ovpn_ip TEXT DEFAULT '',
+			ovpn_enabled INTEGER NOT NULL DEFAULT 0,
+			used_ovpn_bytes INTEGER NOT NULL DEFAULT 0,
+			last_ovpn_bytes INTEGER NOT NULL DEFAULT 0,
+			ovpn_cert TEXT DEFAULT '',
+			ovpn_key TEXT DEFAULT ''
+		)`,
+		"INSERT INTO peers_new(" + cols + ") SELECT " + cols + " FROM peers",
+		"DROP TABLE peers",
+		"ALTER TABLE peers_new RENAME TO peers",
+	} {
+		if _, err := tx.Exec(s); err != nil {
+			tx.Rollback()
+			die("phase5 migrate failed (rolled back, original table intact): %v", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		die("phase5 migrate: commit: %v", err)
+	}
 }
 
 func scanPeer(rows interface{ Scan(...interface{}) error }) (Peer, error) {
@@ -344,6 +406,9 @@ func livePeers(iface string) map[string]bool {
 // Guard: unless force, refuse if a live peer is missing from the DB (prevents dropping
 // un-imported peers and disconnecting their users).
 func renderConf(db *sql.DB, cfg Config, force bool) {
+	if cfg.WGConf == "" {
+		return // OpenVPN-only install — no WireGuard config to render
+	}
 	if !force {
 		dbset := map[string]bool{}
 		for _, p := range allPeers(db) {
@@ -360,6 +425,9 @@ func renderConf(db *sql.DB, cfg Config, force bool) {
 	b.WriteString(strings.TrimRight(head, "\n"))
 	b.WriteString("\n\n" + peerMarker + "\n")
 	for _, p := range allPeers(db) {
+		if p.PublicKey == "" {
+			continue // OVPN-only user — no WireGuard peer entry
+		}
 		b.WriteString(fmt.Sprintf("\n### wgmgr:%s\n[Peer]\nPublicKey = %s\n", p.Username, p.PublicKey))
 		if p.PSK != "" {
 			b.WriteString("PresharedKey = " + p.PSK + "\n")
@@ -438,6 +506,10 @@ func cmdInit(args []string) {
 		APIListen: ":8443", TLSCert: "/etc/wgmgr/cert.pem", TLSKey: "/etc/wgmgr/key.pem",
 		IntervalS: 180, IPSet: "wgmgr_blocked",
 	}
+	ovpnOnly := flags["ovpn-only"] == "true"
+	if ovpnOnly {
+		cfg.Interface, cfg.WGConf, cfg.Params = "", "", "" // no WireGuard on this box
+	}
 	// generate API token if none
 	tok := make([]byte, 32)
 	rand.Read(tok)
@@ -464,13 +536,19 @@ func cmdInit(args []string) {
 	}
 	db := openDB(cfg.DB)
 	defer db.Close()
-	// sanity: parse params + interface
-	pm := parseParams(cfg.Params)
-	_, ipnet, srv := interfaceHead(cfg.WGConf)
-	fmt.Printf("initialized. iface=%s subnet=%s server=%s db=%s\n", cfg.Interface, ipnet, srv, cfg.DB)
+	pubip := ""
+	if ovpnOnly {
+		fmt.Printf("initialized (OpenVPN-only — no WireGuard). db=%s\n", cfg.DB)
+	} else {
+		// sanity: parse params + interface
+		pm := parseParams(cfg.Params)
+		_, ipnet, srv := interfaceHead(cfg.WGConf)
+		pubip = pm["SERVER_PUB_IP"]
+		fmt.Printf("initialized. iface=%s subnet=%s server=%s db=%s\n", cfg.Interface, ipnet, srv, cfg.DB)
+	}
 	fmt.Printf("API token written to %s (keep secret)\n", configPath)
 	fmt.Printf("panel login: admin / %s  (change anytime: wgmgr set-login <user> <pass>)\n", adminPass)
-	fmt.Printf("panel URL: https://%s%s%s/\n", pm["SERVER_PUB_IP"], cfg.APIListen, cfg.BasePath)
+	fmt.Printf("panel URL: https://%s%s%s/\n", pubip, cfg.APIListen, cfg.BasePath)
 }
 
 // cmdImport pulls existing peers from wg0.conf into the DB. Optional arg: path to a
@@ -584,7 +662,7 @@ func parseFlags(args []string) (positional []string, flags map[string]string) {
 func cmdAdd(args []string) {
 	pos, flags := parseFlags(args)
 	if len(pos) < 1 {
-		die("usage: wgmgr add <username> [--quota-gb N] [--days D]")
+		die("usage: wgmgr add <username> [--quota-gb N] [--days D] [--ovpn-only]")
 	}
 	username := pos[0]
 	cfg := loadConfig()
@@ -608,6 +686,24 @@ func cmdAdd(args []string) {
 			die("bad --days")
 		}
 		expires = time.Now().UTC().AddDate(0, 0, d).Format(time.RFC3339)
+	}
+	if flags["ovpn-only"] == "true" {
+		ovpnDefaults(&cfg)
+		if !fileExists(filepath.Join(cfg.OvpnDir, "ca.crt")) {
+			die("openvpn is not initialized — run `wgmgr ovpn-init` first")
+		}
+		if _, err := db.Exec(`INSERT INTO peers(username,public_key,private_key,preshared_key,address,quota_bytes,expires_at,enabled,created_at,updated_at)
+			VALUES(?,'','','','',?,?,1,?,?)`, username, quota, expires, nowUTC(), nowUTC()); err != nil {
+			die("insert: %v", err)
+		}
+		p, _ := getPeer(db, username)
+		ovpnAttach(db, cfg, p)
+		p, _ = getPeer(db, username)
+		fmt.Print(ovpnConfigForPeer(cfg, p))
+		return
+	}
+	if cfg.WGConf == "" {
+		die("this is an OpenVPN-only install — create users with `--ovpn-only`")
 	}
 	priv, pub, psk := genKeys()
 	ip := nextFreeIP(db, cfg.WGConf)

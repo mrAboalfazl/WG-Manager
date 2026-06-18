@@ -87,8 +87,9 @@ POST   /api-token/regenerate     -> { token }              # rotate (old token d
 
 # Users
 GET    /peers                    -> { peers:[<user>,…], server:"<ip>" }
-POST   /peers                    {username, quota_gb?, days?}
-                                 -> 201 { <user>, client_config:"<WireGuard .conf>" }
+POST   /peers                    {username, quota_gb?, days?, ovpn_only?:bool}
+                                 -> 201 { <user>, client_config:"<WireGuard .conf | .ovpn>" }
+                                 #  ovpn_only:true -> user with NO WireGuard; client_config is the .ovpn
 GET    /peers/{name}             -> <user>
 DELETE /peers/{name}             -> { deleted:"name" }
 POST   /peers/{name}/quota       {quota_gb}                       -> <user>   # set the shared cap
@@ -145,6 +146,11 @@ renewing or recharging never forces a re-download.
 
 > The server must have OpenVPN initialized once (`wgmgr ovpn-init`, or the installer with
 > `INSTALL_OVPN=1`) before step 2 works. WireGuard-only users skip step 2 entirely.
+
+**OpenVPN-only user (no WireGuard):** `POST /peers {"username":"bob","quota_gb":50,"ovpn_only":true}`
+creates the user with no WG identity and returns the `.ovpn` directly in `client_config` (one step).
+This is what you use on an **OpenVPN-only server** (installed with `INSTALL_WG=0`), where regular
+`POST /peers` has no WireGuard to allocate.
 
 ---
 

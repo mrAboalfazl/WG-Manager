@@ -102,6 +102,9 @@ case "$(uname -m)" in
   *) err "unsupported arch: $(uname -m)"; exit 1;;
 esac
 
+# OpenVPN-only install (INSTALL_WG=0) implies OpenVPN.
+[ "${INSTALL_WG:-1}" = "0" ] && INSTALL_OVPN=1
+
 OVPN_PKG=""
 [ "${INSTALL_OVPN:-0}" = "1" ] && OVPN_PKG="openvpn"
 say "installing dependencies (ipset, wireguard-tools${OVPN_PKG:+, openvpn})…"
@@ -111,7 +114,7 @@ if command -v apt-get >/dev/null 2>&1; then
 fi
 command -v wg >/dev/null 2>&1 || { err "wireguard-tools (wg) not found — set up WireGuard first."; exit 1; }
 
-if [ ! -f "/etc/wireguard/${IFACE}.conf" ] || [ ! -f /etc/wireguard/params ]; then
+if [ "${INSTALL_WG:-1}" != "0" ] && { [ ! -f "/etc/wireguard/${IFACE}.conf" ] || [ ! -f /etc/wireguard/params ]; }; then
   bootstrap_wireguard
 fi
 
@@ -133,8 +136,13 @@ mv -f "${PREFIX}/wgmgr.new" "${PREFIX}/wgmgr"
 
 # --- init config + admin credentials (only on first install) ---
 if [ ! -f /etc/wgmgr/config.json ]; then
-  say "first-time init (generates API token + random admin password)…"
-  "${PREFIX}/wgmgr" init
+  if [ "${INSTALL_WG:-1}" = "0" ]; then
+    say "first-time init (OpenVPN-only — no WireGuard)…"
+    "${PREFIX}/wgmgr" init --ovpn-only
+  else
+    say "first-time init (generates API token + random admin password)…"
+    "${PREFIX}/wgmgr" init
+  fi
 fi
 
 # --- import existing peers into the DB, then take ownership of the peer section ---
