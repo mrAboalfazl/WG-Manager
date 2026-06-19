@@ -286,8 +286,9 @@ func ovpnAttach(db *sql.DB, cfg Config, p Peer) string {
 	ca, caKey := ovpnEnsureCA(cfg.OvpnDir)
 	certPEM, keyPEM := ovpnIssueCert(ca, caKey, p.Username, false)
 	ip := ovpnNextFreeIP(db, cfg.OvpnSubnet)
-	writeFileMode(filepath.Join(cfg.OvpnDir, "ccd", p.Username),
-		fmt.Sprintf("ifconfig-push %s %s\n", ip, ovpnMask(cfg.OvpnSubnet)), 0o644)
+	ccdFile := filepath.Join(cfg.OvpnDir, "ccd", p.Username)
+	writeFileMode(ccdFile, fmt.Sprintf("ifconfig-push %s %s\n", ip, ovpnMask(cfg.OvpnSubnet)), 0o644)
+	os.Chmod(ccdFile, 0o644) // force readable by OpenVPN's 'nobody' regardless of umask
 	if _, err := db.Exec("UPDATE peers SET ovpn_cn=?,ovpn_ip=?,ovpn_enabled=1,ovpn_cert=?,ovpn_key=?,updated_at=? WHERE id=?",
 		p.Username, ip, certPEM, keyPEM, nowUTC(), p.ID); err != nil {
 		die("ovpn attach: %v", err)
@@ -342,7 +343,9 @@ func cmdOvpnInit(args []string) {
 
 	// 0755: OpenVPN reads CCD files at connect time AFTER dropping to user 'nobody', so the
 	// dir must be traversable by non-root or `ccd-exclusive` rejects every client (AUTH_FAILED).
-	os.MkdirAll(filepath.Join(cfg.OvpnDir, "ccd"), 0o755)
+	ccdDir := filepath.Join(cfg.OvpnDir, "ccd")
+	os.MkdirAll(ccdDir, 0o755)
+	os.Chmod(ccdDir, 0o755) // MkdirAll's mode is umask-masked (install.sh sets umask 077) — force it
 	ca, caKey := ovpnEnsureCA(cfg.OvpnDir)
 	srvCrt, srvKey := filepath.Join(cfg.OvpnDir, "server.crt"), filepath.Join(cfg.OvpnDir, "server.key")
 	if !(fileExists(srvCrt) && fileExists(srvKey)) {
