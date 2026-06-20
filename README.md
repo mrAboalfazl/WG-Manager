@@ -29,15 +29,27 @@ their **existing config** (no re-issue).
   it's detected and used as-is. `ipset` / `wireguard-tools` are installed automatically.
 
 ## Install / update
+Run it and it **asks which VPN(s)** (WireGuard / OpenVPN / both) and **which ports** — then installs
+deps, sets up the VPN(s), drops the `wgmgr` binary, generates an API token + a random admin password
+(printed once), and starts the service. Re-run anytime to update.
 ```bash
 curl -fsSL https://raw.githubusercontent.com/mrAboalfazl/WG-Manager/main/install.sh | bash
 ```
-It installs deps, **sets up native WireGuard if none exists**, drops the `wgmgr` binary, imports any
-existing peers, generates an API token + a **random admin password** (printed once), and starts the
-service. Re-run anytime to update. Customize the WireGuard bootstrap, e.g.:
+
+**Non-interactive / scripted** — set the choices as env vars (no prompts shown):
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mrAboalfazl/WG-Manager/main/install.sh | WG_PORT=51820 WG_SUBNET=10.8.0.0/24 bash
+curl -fsSL …/install.sh | INSTALL_OVPN=1 bash                      # WireGuard + OpenVPN
+curl -fsSL …/install.sh | INSTALL_WG=0 bash                        # OpenVPN only
+curl -fsSL …/install.sh | INSTALL_OVPN=1 WG_PORT=51820 OVPN_PORT=1194 bash   # both, custom ports
+curl -fsSL …/install.sh | WG_PORT=53 WG_SUBNET=10.8.0.0/24 bash    # WireGuard only, custom port/subnet
 ```
+| Env var | Default | Meaning |
+|---|---|---|
+| `INSTALL_OVPN` | `0` | `1` = also install OpenVPN |
+| `INSTALL_WG` | `1` | `0` = OpenVPN-only (no WireGuard) |
+| `WG_PORT` / `WG_SUBNET` | `51820` / `10.66.66.0/24` | WireGuard UDP port / subnet |
+| `OVPN_PORT` / `OVPN_PROTO` / `OVPN_SUBNET` | `1194` / `udp` / `10.8.0.0/24` | OpenVPN port / proto / subnet |
+| `OVPN_ENDPOINT` | auto-detected | public IP/host clients dial (set this if the box is behind NAT) |
 
 After install:
 - **Panel:** served on a **secret web path** printed at the end of install, e.g.

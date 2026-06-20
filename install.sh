@@ -102,6 +102,27 @@ case "$(uname -m)" in
   *) err "unsupported arch: $(uname -m)"; exit 1;;
 esac
 
+# --- interactive selection: ask which VPN(s) + which ports when run by hand on a terminal.
+# Skipped entirely for automation (no tty, or the choice pre-set via env vars), so piped/cron
+# installs stay non-interactive. Works through `curl | bash` because we read from /dev/tty.
+if [ -r /dev/tty ] && [ -z "${INSTALL_OVPN+x}" ] && [ -z "${INSTALL_WG+x}" ]; then
+  printf '\nWhich VPN(s) to install?\n  1) WireGuard only (default)\n  2) OpenVPN only\n  3) Both WireGuard + OpenVPN\nchoice [1]: ' > /dev/tty
+  read -r _c < /dev/tty || _c=1
+  case "$_c" in
+    2) INSTALL_WG=0; INSTALL_OVPN=1 ;;
+    3) INSTALL_OVPN=1 ;;
+    *) : ;;   # 1 / empty -> WireGuard only
+  esac
+  if [ "${INSTALL_WG:-1}" != "0" ] && [ -z "${WG_PORT+x}" ]; then
+    printf 'WireGuard UDP port [51820]: ' > /dev/tty; read -r _p < /dev/tty || _p=""
+    if [ -n "$_p" ]; then WG_PORT="$_p"; fi
+  fi
+  if [ "${INSTALL_OVPN:-0}" = "1" ] && [ -z "${OVPN_PORT+x}" ]; then
+    printf 'OpenVPN UDP port [1194]: ' > /dev/tty; read -r _p < /dev/tty || _p=""
+    if [ -n "$_p" ]; then OVPN_PORT="$_p"; fi
+  fi
+fi
+
 # OpenVPN-only install (INSTALL_WG=0) implies OpenVPN.
 [ "${INSTALL_WG:-1}" = "0" ] && INSTALL_OVPN=1
 
