@@ -38,10 +38,14 @@ curl -fsSL https://raw.githubusercontent.com/mrAboalfazl/WG-Manager/main/install
 
 **Non-interactive / scripted** — set the choices as env vars (no prompts shown):
 ```bash
-curl -fsSL …/install.sh | INSTALL_OVPN=1 bash                      # WireGuard + OpenVPN
-curl -fsSL …/install.sh | INSTALL_WG=0 bash                        # OpenVPN only
-curl -fsSL …/install.sh | INSTALL_OVPN=1 WG_PORT=51820 OVPN_PORT=1194 bash   # both, custom ports
-curl -fsSL …/install.sh | WG_PORT=53 WG_SUBNET=10.8.0.0/24 bash    # WireGuard only, custom port/subnet
+# WireGuard + OpenVPN
+curl -fsSL https://raw.githubusercontent.com/mrAboalfazl/WG-Manager/main/install.sh | INSTALL_OVPN=1 bash
+# OpenVPN only
+curl -fsSL https://raw.githubusercontent.com/mrAboalfazl/WG-Manager/main/install.sh | INSTALL_WG=0 bash
+# both, custom ports
+curl -fsSL https://raw.githubusercontent.com/mrAboalfazl/WG-Manager/main/install.sh | INSTALL_OVPN=1 WG_PORT=51820 OVPN_PORT=1194 bash
+# WireGuard only, custom port + subnet
+curl -fsSL https://raw.githubusercontent.com/mrAboalfazl/WG-Manager/main/install.sh | WG_PORT=53 WG_SUBNET=10.8.0.0/24 bash
 ```
 | Env var | Default | Meaning |
 |---|---|---|
