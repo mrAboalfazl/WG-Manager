@@ -106,7 +106,7 @@ func ovpnEnsureCA(dir string) (*x509.Certificate, *ecdsa.PrivateKey) {
 	if err != nil {
 		die("ovpn: create CA: %v", err)
 	}
-	os.MkdirAll(dir, 0o700)
+	os.MkdirAll(dir, 0o755) // /etc/openvpn must be traversable by 'nobody'; the key below stays 0600
 	writeFileMode(keyPath, keyPEM(key), 0o600)
 	writeFileMode(crtPath, pemBlock("CERTIFICATE", der), 0o644)
 	return loadCert(crtPath), key
@@ -341,11 +341,14 @@ func cmdOvpnInit(args []string) {
 		cfg.OvpnEndpoint = parseParams(cfg.Params)["SERVER_PUB_IP"]
 	}
 
-	// 0755: OpenVPN reads CCD files at connect time AFTER dropping to user 'nobody', so the
-	// dir must be traversable by non-root or `ccd-exclusive` rejects every client (AUTH_FAILED).
+	// 0755: OpenVPN reads CCD files at connect time AFTER dropping to user 'nobody', so BOTH
+	// /etc/openvpn and its ccd/ must be traversable by non-root or `ccd-exclusive` rejects every
+	// client (AUTH_FAILED). MkdirAll's mode is umask-masked (install.sh sets umask 077) — force it.
+	os.MkdirAll(cfg.OvpnDir, 0o755)
+	os.Chmod(cfg.OvpnDir, 0o755)
 	ccdDir := filepath.Join(cfg.OvpnDir, "ccd")
 	os.MkdirAll(ccdDir, 0o755)
-	os.Chmod(ccdDir, 0o755) // MkdirAll's mode is umask-masked (install.sh sets umask 077) — force it
+	os.Chmod(ccdDir, 0o755)
 	ca, caKey := ovpnEnsureCA(cfg.OvpnDir)
 	srvCrt, srvKey := filepath.Join(cfg.OvpnDir, "server.crt"), filepath.Join(cfg.OvpnDir, "server.key")
 	if !(fileExists(srvCrt) && fileExists(srvKey)) {
