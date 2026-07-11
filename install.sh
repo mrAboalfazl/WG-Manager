@@ -57,6 +57,159 @@ C
   say "WireGuard up: ${IFACE} udp/${port}, subnet ${subnet}, egress ${nic}, public ${pubip}"
 }
 
+install_openvpn_routing(){
+  say "installing OpenVPN routing/firewall preflight service..."
+  cat > /etc/sysctl.d/99-wgmgr-openvpn.conf <<'SYSCTL'
+net.ipv4.ip_forward=1
+SYSCTL
+  sysctl --system >/dev/null 2>&1 || sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
+  printf 'd /run/wgmgr 0755 root root -\n' > /etc/tmpfiles.d/wgmgr.conf
+  systemd-tmpfiles --create /etc/tmpfiles.d/wgmgr.conf >/dev/null 2>&1 || mkdir -p /run/wgmgr
+  if [ -f /etc/apparmor.d/openvpn ]; then
+    mkdir -p /etc/apparmor.d/local
+    if [ ! -f /etc/apparmor.d/local/openvpn ] || ! grep -q '/run/wgmgr/' /etc/apparmor.d/local/openvpn; then
+      {
+        echo '# Allow wgmgr OpenVPN management socket.'
+        echo '/run/wgmgr/** rw,'
+        echo '/var/run/wgmgr/** rw,'
+      } >> /etc/apparmor.d/local/openvpn
+    fi
+    apparmor_parser -r /etc/apparmor.d/openvpn >/dev/null 2>&1 || true
+  fi
+
+  cat > "${PREFIX}/wgmgr-openvpn-routing" <<'ROUTE'
+#!/bin/sh
+set -eu
+
+CONFIG="${WGMGR_CONFIG:-/etc/wgmgr/config.json}"
+OVPN_CONF="/etc/openvpn/server/server.conf"
+[ -r "$OVPN_CONF" ] || OVPN_CONF="/etc/openvpn/server.conf"
+
+json_value() {
+  key="$1"
+  [ -r "$CONFIG" ] || return 0
+  sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$CONFIG" | head -n 1
+}
+
+mask_to_cidr() {
+  case "$1" in
+    255.255.255.255) echo 32 ;;
+    255.255.255.0) echo 24 ;;
+    255.255.0.0) echo 16 ;;
+    255.0.0.0) echo 8 ;;
+    *) echo 24 ;;
+  esac
+}
+
+subnet="$(json_value ovpn_subnet)"
+port="$(json_value ovpn_port)"
+proto="$(json_value ovpn_proto)"
+
+if [ -z "$subnet" ] && [ -r "$OVPN_CONF" ]; then
+  net="$(awk '/^server /{print $2; exit}' "$OVPN_CONF")"
+  mask="$(awk '/^server /{print $3; exit}' "$OVPN_CONF")"
+  [ -n "$net" ] && subnet="$net/$(mask_to_cidr "$mask")"
+fi
+[ -n "$subnet" ] || subnet="10.8.0.0/24"
+[ -n "$port" ] || port="$(awk '/^port /{print $2; exit}' "$OVPN_CONF" 2>/dev/null || true)"
+[ -n "$port" ] || port="1194"
+[ -n "$proto" ] || proto="$(awk '/^proto /{print $2; exit}' "$OVPN_CONF" 2>/dev/null || true)"
+proto="${proto%6}"
+case "$proto" in tcp*) proto="tcp" ;; *) proto="udp" ;; esac
+
+nic="$(ip -4 route show default 2>/dev/null | awk '{print $5; exit}')"
+[ -n "$nic" ] || { echo "wgmgr-openvpn-routing: no default IPv4 route found" >&2; exit 1; }
+
+mkdir -p /run/wgmgr
+sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
+
+if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet firewalld 2>/dev/null && command -v firewall-cmd >/dev/null 2>&1; then
+  firewall-cmd --permanent --add-port="${port}/${proto}" >/dev/null 2>&1 || true
+  firewall-cmd --permanent --add-masquerade >/dev/null 2>&1 || true
+  firewall-cmd --permanent --add-rich-rule="rule family=\"ipv4\" source address=\"${subnet}\" accept" >/dev/null 2>&1 || true
+  firewall-cmd --reload >/dev/null 2>&1 || true
+  exit 0
+fi
+
+if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet nftables 2>/dev/null && command -v nft >/dev/null 2>&1; then
+  mkdir -p /etc/nftables
+  cat > /etc/nftables/wgmgr-openvpn.nft <<NFT
+table inet wgmgr_openvpn {
+  chain input {
+    type filter hook input priority 0; policy accept;
+    iifname "tun*" ip saddr ${subnet} accept
+    iifname "${nic}" ${proto} dport ${port} accept
+  }
+  chain forward {
+    type filter hook forward priority 0; policy accept;
+    iifname "tun*" ip saddr ${subnet} accept
+    oifname "tun*" ip daddr ${subnet} accept
+  }
+}
+
+table ip wgmgr_openvpn_nat {
+  chain postrouting {
+    type nat hook postrouting priority 100; policy accept;
+    ip saddr ${subnet} oifname "${nic}" masquerade
+  }
+}
+NFT
+  if [ -f /etc/nftables.conf ] && ! grep -q 'wgmgr-openvpn.nft' /etc/nftables.conf; then
+    printf 'include "/etc/nftables/wgmgr-openvpn.nft"\n' >> /etc/nftables.conf
+  fi
+  nft delete table inet wgmgr_openvpn >/dev/null 2>&1 || true
+  nft delete table ip wgmgr_openvpn_nat >/dev/null 2>&1 || true
+  nft -f /etc/nftables/wgmgr-openvpn.nft
+  exit 0
+fi
+
+if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi '^Status: active'; then
+  ufw allow "${port}/${proto}" >/dev/null 2>&1 || true
+fi
+
+iptables -w -t nat -C POSTROUTING -s "$subnet" -o "$nic" -j MASQUERADE 2>/dev/null \
+  || iptables -w -t nat -A POSTROUTING -s "$subnet" -o "$nic" -j MASQUERADE
+iptables -w -C INPUT -i "$nic" -p "$proto" --dport "$port" -j ACCEPT 2>/dev/null \
+  || iptables -w -I INPUT 1 -i "$nic" -p "$proto" --dport "$port" -j ACCEPT
+iptables -w -C INPUT -i tun+ -s "$subnet" -j ACCEPT 2>/dev/null \
+  || iptables -w -I INPUT 1 -i tun+ -s "$subnet" -j ACCEPT
+iptables -w -C FORWARD -s "$subnet" -j ACCEPT 2>/dev/null \
+  || iptables -w -A FORWARD -s "$subnet" -j ACCEPT
+iptables -w -C FORWARD -d "$subnet" -j ACCEPT 2>/dev/null \
+  || iptables -w -A FORWARD -d "$subnet" -j ACCEPT
+ROUTE
+  chmod +x "${PREFIX}/wgmgr-openvpn-routing"
+
+  cat > /etc/systemd/system/wgmgr-openvpn-routing.service <<UNIT
+[Unit]
+Description=wgmgr OpenVPN routing/firewall preflight
+Wants=network-online.target
+After=network-online.target firewalld.service nftables.service ufw.service
+Before=openvpn-server@server.service openvpn@server.service
+
+[Service]
+Type=oneshot
+ExecStart=${PREFIX}/wgmgr-openvpn-routing
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+  for unit in openvpn-server@server.service openvpn@server.service; do
+    mkdir -p "/etc/systemd/system/${unit}.d"
+    cat > "/etc/systemd/system/${unit}.d/10-wgmgr-routing.conf" <<'DROPIN'
+[Unit]
+Wants=network-online.target
+Requires=wgmgr-openvpn-routing.service
+After=network-online.target wgmgr-openvpn-routing.service
+DROPIN
+  done
+
+  systemctl daemon-reload
+  systemctl enable --now wgmgr-openvpn-routing.service >/dev/null 2>&1 || true
+}
+
 # Optional: add OpenVPN alongside WireGuard (set INSTALL_OVPN=1). Users then get a single
 # COMBINED quota across both protocols via `wgmgr ovpn-add <user>`. Overrides: OVPN_PORT /
 # OVPN_PROTO / OVPN_SUBNET / OVPN_ENDPOINT. (Generated here; validate on a real server.)
@@ -64,22 +217,11 @@ bootstrap_openvpn(){
   [ "${INSTALL_OVPN:-0}" = "1" ] || return 0
   command -v openvpn >/dev/null 2>&1 || { err "openvpn not installed; skipping OVPN setup"; return 0; }
   say "setting up OpenVPN (combined-quota with WireGuard)…"
-  local nic; nic="$(ip -4 route ls default 2>/dev/null | awk '{print $5; exit}')"
-  local subnet="${OVPN_SUBNET:-10.8.0.0/24}"
-  mkdir -p /run/wgmgr
-  printf 'd /run/wgmgr 0755 root root -\n' > /etc/tmpfiles.d/wgmgr.conf
   "${PREFIX}/wgmgr" ovpn-init ${OVPN_PORT:+--port "$OVPN_PORT"} ${OVPN_PROTO:+--proto "$OVPN_PROTO"} \
     ${OVPN_SUBNET:+--subnet "$OVPN_SUBNET"} ${OVPN_ENDPOINT:+--endpoint "$OVPN_ENDPOINT"} \
     || { err "wgmgr ovpn-init failed; skipping"; return 0; }
-  sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
-  # NAT + forward for the OVPN subnet. APPEND (-A) the ACCEPTs so they sit BELOW wgmgr's
-  # position-1 ipset DROP rule — a blocked user must be dropped before being accepted.
-  iptables -t nat -C POSTROUTING -s "$subnet" -o "$nic" -j MASQUERADE 2>/dev/null \
-    || iptables -t nat -A POSTROUTING -s "$subnet" -o "$nic" -j MASQUERADE
-  iptables -C FORWARD -s "$subnet" -j ACCEPT 2>/dev/null || iptables -A FORWARD -s "$subnet" -j ACCEPT
-  iptables -C FORWARD -d "$subnet" -j ACCEPT 2>/dev/null || iptables -A FORWARD -d "$subnet" -j ACCEPT
-  ( netfilter-persistent save || iptables-save > /etc/iptables/rules.v4 ) >/dev/null 2>&1 \
-    || say "note: persist iptables yourself so the OVPN NAT survives reboot"
+  install_openvpn_routing
+  systemctl restart wgmgr-openvpn-routing.service >/dev/null 2>&1 || true
   # Ubuntu's canonical unit is openvpn-server@server (reads /etc/openvpn/server/server.conf);
   # fall back to the legacy openvpn@server (reads /etc/openvpn/server.conf). Verified on 22.04.
   mkdir -p /etc/openvpn/server
@@ -91,7 +233,8 @@ bootstrap_openvpn(){
     say "OpenVPN service: openvpn@server (legacy)"
   fi
   systemctl restart wgmgr.service >/dev/null 2>&1 || true  # reload config so the enforce loop reads ovpn_mgmt
-  say "OpenVPN up: proto $(awk '/^proto/{print $2}' /etc/openvpn/server.conf) port $(awk '/^port/{print $2}' /etc/openvpn/server.conf) subnet ${subnet}"
+  local subnet; subnet="$(sed -n 's/.*"ovpn_subnet"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' /etc/wgmgr/config.json 2>/dev/null)"
+  say "OpenVPN up: proto $(awk '/^proto/{print $2}' /etc/openvpn/server.conf) port $(awk '/^port/{print $2}' /etc/openvpn/server.conf) subnet ${subnet:-10.8.0.0/24}"
 }
 
 [ "$(id -u)" = 0 ] || { err "please run as root"; exit 1; }
@@ -127,13 +270,17 @@ fi
 [ "${INSTALL_WG:-1}" = "0" ] && INSTALL_OVPN=1
 
 OVPN_PKG=""
+WG_PKG=""
 [ "${INSTALL_OVPN:-0}" = "1" ] && OVPN_PKG="openvpn"
-say "installing dependencies (ipset, wireguard-tools${OVPN_PKG:+, openvpn})…"
+[ "${INSTALL_WG:-1}" != "0" ] && WG_PKG="wireguard-tools"
+say "installing dependencies (ipset${WG_PKG:+, wireguard-tools}${OVPN_PKG:+, openvpn})..."
 if command -v apt-get >/dev/null 2>&1; then
   apt-get update -qq || true
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ipset wireguard-tools curl $OVPN_PKG >/dev/null 2>&1 || true
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ipset curl $WG_PKG $OVPN_PKG >/dev/null 2>&1 || true
 fi
-command -v wg >/dev/null 2>&1 || { err "wireguard-tools (wg) not found — set up WireGuard first."; exit 1; }
+if [ "${INSTALL_WG:-1}" != "0" ]; then
+  command -v wg >/dev/null 2>&1 || { err "wireguard-tools (wg) not found — set up WireGuard first."; exit 1; }
+fi
 
 if [ "${INSTALL_WG:-1}" != "0" ] && { [ ! -f "/etc/wireguard/${IFACE}.conf" ] || [ ! -f /etc/wireguard/params ]; }; then
   bootstrap_wireguard

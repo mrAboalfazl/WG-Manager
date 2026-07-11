@@ -79,15 +79,43 @@ func TestOvpnTLSCryptFormat(t *testing.T) {
 }
 
 func TestOvpnClientConfig(t *testing.T) {
-	cfg := Config{OvpnProto: "udp", OvpnEndpoint: "vpn.example.com", OvpnPort: "1194"}
+	cfg := Config{OvpnProto: "udp", OvpnEndpoint: "vpn.example.com", OvpnPort: "1194", OvpnMSSFix: "1360"}
 	out := ovpnClientConfig(cfg, "CA", "CERT", "KEY", "TC")
 	for _, want := range []string{
 		"remote vpn.example.com 1194", "proto udp", "remote-cert-tls server",
-		"<ca>", "<cert>", "<key>", "<tls-crypt>",
+		"mssfix 1360", "<ca>", "<cert>", "<key>", "<tls-crypt>",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf(".ovpn missing %q", want)
 		}
+	}
+}
+
+func TestOvpnServerConfigUsesRuntimeIdentityAndMSS(t *testing.T) {
+	cfg := Config{
+		OvpnDir:    "/etc/openvpn",
+		OvpnSubnet: "10.8.0.0/24",
+		OvpnPort:   "1194",
+		OvpnProto:  "udp",
+		OvpnMgmt:   "unix:/run/wgmgr/ovpn.sock",
+		OvpnDNS:    "1.1.1.1",
+		OvpnUser:   "nobody",
+		OvpnGroup:  "nobody",
+		OvpnMSSFix: "1360",
+	}
+	out := ovpnServerConf(cfg)
+	for _, want := range []string{
+		"user nobody",
+		"group nobody",
+		"mssfix 1360",
+		"management /run/wgmgr/ovpn.sock unix",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("server.conf missing %q", want)
+		}
+	}
+	if strings.Contains(out, "group nogroup") {
+		t.Errorf("server.conf should not hardcode group nogroup when a group is configured")
 	}
 }
 

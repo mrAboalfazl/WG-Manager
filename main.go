@@ -5,6 +5,7 @@
 package main
 
 import (
+	"bufio"
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
@@ -29,16 +30,16 @@ const configPath = "/etc/wgmgr/config.json"
 const peerMarker = "# >>> wgmgr managed peers (do not edit below) >>>"
 
 type Config struct {
-	Interface  string `json:"interface"`
-	WGConf     string `json:"wg_conf"`
-	Params     string `json:"params"`
-	DB         string `json:"db"`
-	ClientsDir string `json:"clients_dir"`
-	APIListen  string `json:"api_listen"`
-	APIToken   string `json:"api_token"`
-	BasePath   string `json:"base_path"` // panel web path prefix, e.g. "/a1b2c3"; "" = root (existing installs stay at root)
-	TLSCert    string `json:"tls_cert"`
-	TLSKey     string `json:"tls_key"`
+	Interface     string `json:"interface"`
+	WGConf        string `json:"wg_conf"`
+	Params        string `json:"params"`
+	DB            string `json:"db"`
+	ClientsDir    string `json:"clients_dir"`
+	APIListen     string `json:"api_listen"`
+	APIToken      string `json:"api_token"`
+	BasePath      string `json:"base_path"` // panel web path prefix, e.g. "/a1b2c3"; "" = root (existing installs stay at root)
+	TLSCert       string `json:"tls_cert"`
+	TLSKey        string `json:"tls_key"`
 	IntervalS     int    `json:"enforce_interval_sec"`
 	IPSet         string `json:"ipset_name"`
 	AdminUser     string `json:"admin_user"`
@@ -50,6 +51,10 @@ type Config struct {
 	OvpnProto     string `json:"ovpn_proto"`
 	OvpnEndpoint  string `json:"ovpn_endpoint"` // public host clients dial (defaults to SERVER_PUB_IP)
 	OvpnDNS       string `json:"ovpn_dns"`
+	OvpnUser      string `json:"ovpn_user"`
+	OvpnGroup     string `json:"ovpn_group"`
+	OvpnMSSFix    string `json:"ovpn_mssfix"`
+	OvpnTunMTU    string `json:"ovpn_tun_mtu"`
 }
 
 type Peer struct {
@@ -808,6 +813,379 @@ func setField(args []string, usage string, apply func(db *sql.DB, p Peer, cfg Co
 	apply(db, p, cfg)
 }
 
+func printUsage() {
+	fmt.Println("wgmgr <menu|status|restart|reinstall|uninstall|init|import|add|rm|list|show|config|set-quota|renew|enable|disable|render|serve|set-login|set-base-path|ovpn-init|ovpn-add|ovpn-config|ovpn-rm> ...")
+	fmt.Println("uninstall flags: --yes --purge-data --purge-openvpn --purge-wireguard")
+	fmt.Println("Run `wgmgr` with no arguments on a terminal to open the management menu.")
+}
+
+func isInteractive() bool {
+	st, err := os.Stdin.Stat()
+	return err == nil && (st.Mode()&os.ModeCharDevice) != 0
+}
+
+func readLine(r *bufio.Reader, prompt string) string {
+	fmt.Print(prompt)
+	s, _ := r.ReadString('\n')
+	return strings.TrimSpace(s)
+}
+
+func readDefault(r *bufio.Reader, prompt, def string) string {
+	if def != "" {
+		prompt = fmt.Sprintf("%s [%s]: ", strings.TrimRight(prompt, ": "), def)
+	}
+	v := readLine(r, prompt)
+	if v == "" {
+		return def
+	}
+	return v
+}
+
+func confirm(r *bufio.Reader, prompt string) bool {
+	v := strings.ToLower(readLine(r, prompt+" [y/N]: "))
+	return v == "y" || v == "yes"
+}
+
+func runInteractive(name string, args ...string) error {
+	cmd := exec.Command(name, args...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+func serviceState(name string) string {
+	out, err := exec.Command("systemctl", "is-active", name).CombinedOutput()
+	if err != nil {
+		s := strings.TrimSpace(string(out))
+		if s == "" {
+			return "unknown"
+		}
+		return s
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func existingOpenVPNUnit() string {
+	for _, unit := range []string{"openvpn-server@server.service", "openvpn@server.service"} {
+		if serviceState(unit) == "active" {
+			return unit
+		}
+		if err := exec.Command("systemctl", "cat", unit).Run(); err == nil {
+			return unit
+		}
+	}
+	return ""
+}
+
+func cmdStatus() {
+	fmt.Println("WG-Manager status")
+	fmt.Println("  wgmgr.service:", serviceState("wgmgr.service"))
+	fmt.Println("  wgmgr-openvpn-routing.service:", serviceState("wgmgr-openvpn-routing.service"))
+	if unit := existingOpenVPNUnit(); unit != "" {
+		fmt.Printf("  %s: %s\n", unit, serviceState(unit))
+	}
+	cfgPathExists := fileExists(configPath)
+	fmt.Println("  config:", map[bool]string{true: configPath, false: "missing"}[cfgPathExists])
+	if cfgPathExists {
+		cfg := loadConfig()
+		if cfg.Interface != "" {
+			fmt.Printf("  wg-quick@%s.service: %s\n", cfg.Interface, serviceState("wg-quick@"+cfg.Interface+".service"))
+		}
+		fmt.Println("  listen:", cfg.APIListen)
+		fmt.Println("  base_path:", map[bool]string{true: cfg.BasePath, false: "/"}[cfg.BasePath != ""])
+		if cfg.OvpnSubnet != "" {
+			fmt.Printf("  openvpn: %s/%s subnet=%s\n", cfg.OvpnProto, cfg.OvpnPort, cfg.OvpnSubnet)
+		}
+	}
+}
+
+func cmdRestart(args []string) {
+	target := "all"
+	if len(args) > 0 {
+		target = args[0]
+	}
+	cfg := Config{Interface: "wg0"}
+	if fileExists(configPath) {
+		cfg = loadConfig()
+	}
+	restart := func(unit string) {
+		fmt.Println("restarting", unit)
+		if err := runInteractive("systemctl", "restart", unit); err != nil {
+			fmt.Printf("warning: restart %s failed: %v\n", unit, err)
+		}
+	}
+	switch target {
+	case "wgmgr", "panel", "api", "service":
+		restart("wgmgr.service")
+	case "routing", "openvpn-routing":
+		restart("wgmgr-openvpn-routing.service")
+	case "wg", "wireguard":
+		if cfg.Interface != "" {
+			restart("wg-quick@" + cfg.Interface + ".service")
+		} else {
+			fmt.Println("no WireGuard interface configured")
+		}
+	case "ovpn", "openvpn":
+		if unit := existingOpenVPNUnit(); unit != "" {
+			restart(unit)
+		} else {
+			fmt.Println("no OpenVPN systemd unit found")
+		}
+	case "vpn":
+		if cfg.Interface != "" {
+			restart("wg-quick@" + cfg.Interface + ".service")
+		}
+		restart("wgmgr-openvpn-routing.service")
+		if unit := existingOpenVPNUnit(); unit != "" {
+			restart(unit)
+		}
+	case "all":
+		restart("wgmgr-openvpn-routing.service")
+		if cfg.Interface != "" {
+			restart("wg-quick@" + cfg.Interface + ".service")
+		}
+		if unit := existingOpenVPNUnit(); unit != "" {
+			restart(unit)
+		}
+		restart("wgmgr.service")
+	default:
+		die("usage: wgmgr restart [all|wgmgr|vpn|wireguard|openvpn|routing]")
+	}
+}
+
+func cmdReinstall(args []string) {
+	if len(args) == 0 || args[0] != "--yes" {
+		if !isInteractive() {
+			die("reinstall requires --yes when stdin is not interactive")
+		}
+		r := bufio.NewReader(os.Stdin)
+		if !confirm(r, "Download and run the latest WG-Manager installer now?") {
+			fmt.Println("cancelled")
+			return
+		}
+	}
+	script := "curl -fsSL https://raw.githubusercontent.com/mrAboalfazl/WG-Manager/main/install.sh | bash"
+	if err := runInteractive("bash", "-c", script); err != nil {
+		die("reinstall failed: %v", err)
+	}
+}
+
+func removePath(path string) {
+	if err := os.RemoveAll(path); err != nil && !os.IsNotExist(err) {
+		fmt.Printf("warning: remove %s: %v\n", path, err)
+	}
+}
+
+func cmdUninstall(args []string) {
+	_, flags := parseFlags(args)
+	yes := flags["yes"] == "true" || flags["force"] == "true"
+	purgeData := flags["purge-data"] == "true"
+	purgeVPN := flags["purge-vpn"] == "true"
+	purgeOpenVPN := purgeVPN || flags["purge-openvpn"] == "true" || flags["purge-ovpn"] == "true"
+	purgeWireGuard := purgeVPN || flags["purge-wireguard"] == "true" || flags["purge-wg"] == "true"
+	cfg := Config{Interface: "wg0", IPSet: "wgmgr_blocked"}
+	if fileExists(configPath) {
+		cfg = loadConfig()
+		if cfg.IPSet == "" {
+			cfg.IPSet = "wgmgr_blocked"
+		}
+	}
+	r := bufio.NewReader(os.Stdin)
+	if !yes {
+		if !isInteractive() {
+			die("uninstall requires --yes when stdin is not interactive")
+		}
+		fmt.Println("This removes the WG-Manager panel/API service and binary.")
+		fmt.Println("Database, WireGuard, and OpenVPN are kept unless selected below.")
+		if readLine(r, "Type UNINSTALL to continue: ") != "UNINSTALL" {
+			fmt.Println("cancelled")
+			return
+		}
+		purgeData = confirm(r, "Also remove /etc/wgmgr and /var/lib/wgmgr?")
+		purgeOpenVPN = confirm(r, "Also remove OpenVPN service/configuration?")
+		purgeWireGuard = confirm(r, "Also remove WireGuard service/configuration?")
+	}
+
+	run("systemctl", "disable", "--now", "wgmgr.service")
+	if purgeOpenVPN {
+		run("systemctl", "disable", "--now", "wgmgr-openvpn-routing.service")
+		run("systemctl", "disable", "--now", "openvpn-server@server.service")
+		run("systemctl", "disable", "--now", "openvpn@server.service")
+	}
+	if purgeWireGuard {
+		if cfg.Interface != "" {
+			run("systemctl", "disable", "--now", "wg-quick@"+cfg.Interface+".service")
+		}
+	}
+
+	run("iptables", "-D", "FORWARD", "-m", "set", "--match-set", cfg.IPSet, "src", "-j", "DROP")
+	run("iptables", "-D", "FORWARD", "-m", "set", "--match-set", cfg.IPSet, "dst", "-j", "DROP")
+	run("ipset", "destroy", cfg.IPSet)
+
+	for _, path := range []string{
+		"/etc/systemd/system/wgmgr.service",
+	} {
+		removePath(path)
+	}
+	if purgeData {
+		removePath("/etc/wgmgr")
+		removePath("/var/lib/wgmgr")
+	}
+	if purgeOpenVPN {
+		for _, path := range []string{
+			"/etc/systemd/system/wgmgr-openvpn-routing.service",
+			"/etc/systemd/system/openvpn-server@server.service.d/10-wgmgr-routing.conf",
+			"/etc/systemd/system/openvpn@server.service.d/10-wgmgr-routing.conf",
+			"/usr/local/bin/wgmgr-openvpn-routing",
+			"/etc/sysctl.d/99-wgmgr-openvpn.conf",
+			"/etc/tmpfiles.d/wgmgr.conf",
+			"/run/wgmgr",
+			"/etc/openvpn/server",
+			"/etc/openvpn/server.conf",
+		} {
+			removePath(path)
+		}
+	}
+	if purgeWireGuard {
+		removePath("/etc/wireguard")
+	}
+	run("systemctl", "daemon-reload")
+	removePath("/usr/local/bin/wgmgr")
+	fmt.Println("WG-Manager uninstall complete.")
+}
+
+func cmdMenuUninstall(r *bufio.Reader) {
+	fmt.Println()
+	fmt.Println("Uninstall Options")
+	fmt.Println("  1) Panel/API only (keep database and VPN services)")
+	fmt.Println("  2) Panel/API + database")
+	fmt.Println("  3) Panel/API + OpenVPN")
+	fmt.Println("  4) Panel/API + WireGuard")
+	fmt.Println("  5) Complete uninstall (panel + database + OpenVPN + WireGuard)")
+	fmt.Println("  0) Cancel")
+	choice := readLine(r, "Select: ")
+	if choice == "0" || choice == "" {
+		fmt.Println("cancelled")
+		return
+	}
+	if readLine(r, "Type UNINSTALL to continue: ") != "UNINSTALL" {
+		fmt.Println("cancelled")
+		return
+	}
+	args := []string{"--yes"}
+	switch choice {
+	case "1":
+	case "2":
+		args = append(args, "--purge-data")
+	case "3":
+		args = append(args, "--purge-openvpn")
+	case "4":
+		args = append(args, "--purge-wireguard")
+	case "5":
+		args = append(args, "--purge-data", "--purge-openvpn", "--purge-wireguard")
+	default:
+		fmt.Println("unknown selection")
+		return
+	}
+	cmdUninstall(args)
+}
+
+func cmdMenu() {
+	r := bufio.NewReader(os.Stdin)
+	for {
+		fmt.Println()
+		fmt.Println("WG-Manager Management")
+		fmt.Println("  1) Show status")
+		fmt.Println("  2) Restart WG-Manager panel/API")
+		fmt.Println("  3) Restart WireGuard")
+		fmt.Println("  4) Restart OpenVPN")
+		fmt.Println("  5) Restart all VPN services")
+		fmt.Println("  6) Change panel login")
+		fmt.Println("  7) Change panel web path")
+		fmt.Println("  8) List users")
+		fmt.Println("  9) Add user")
+		fmt.Println(" 10) Remove user")
+		fmt.Println(" 11) Reinstall / update WG-Manager")
+		fmt.Println(" 12) Uninstall")
+		fmt.Println("  0) Exit")
+		switch readLine(r, "Select: ") {
+		case "1":
+			cmdStatus()
+		case "2":
+			cmdRestart([]string{"wgmgr"})
+		case "3":
+			cmdRestart([]string{"wireguard"})
+		case "4":
+			cmdRestart([]string{"openvpn"})
+		case "5":
+			cmdRestart([]string{"vpn"})
+		case "6":
+			cfg := loadConfig()
+			user := readDefault(r, "Username: ", cfg.AdminUser)
+			pass := readLine(r, "New password: ")
+			if user == "" || pass == "" {
+				fmt.Println("username and password are required")
+				continue
+			}
+			cfg.AdminUser = user
+			cfg.AdminPassHash = hashPass(pass)
+			saveConfig(cfg)
+			fmt.Println("panel login updated")
+		case "7":
+			path := readDefault(r, "Base path (/ for root): ", "/")
+			cmd := []string{path}
+			func() {
+				defer func() {
+					if rec := recover(); rec != nil {
+						fmt.Println("failed:", rec)
+					}
+				}()
+				cfg := loadConfig()
+				cfg.BasePath = normBase(cmd[0])
+				saveConfig(cfg)
+				fmt.Println("panel base path updated; restart wgmgr to apply")
+			}()
+		case "8":
+			cmdList()
+		case "9":
+			user := readLine(r, "Username: ")
+			if user == "" {
+				fmt.Println("username is required")
+				continue
+			}
+			quota := readDefault(r, "Quota GB (0 unlimited): ", "0")
+			days := readDefault(r, "Days (0 never expires): ", "0")
+			mode := strings.ToLower(readDefault(r, "Protocol wg|ovpn|both: ", "wg"))
+			args := []string{user, "--quota-gb", quota, "--days", days}
+			if mode == "ovpn" {
+				args = append(args, "--ovpn-only")
+			}
+			cmdAdd(args)
+			if mode == "both" {
+				cmdOvpnAdd([]string{user})
+			}
+		case "10":
+			user := readLine(r, "Username to remove: ")
+			if user == "" {
+				continue
+			}
+			if confirm(r, "Remove "+user+"?") {
+				cmdRemove([]string{user})
+			}
+		case "11":
+			cmdReinstall(nil)
+		case "12":
+			cmdMenuUninstall(r)
+			return
+		case "0", "q", "quit", "exit":
+			return
+		default:
+			fmt.Println("unknown selection")
+		}
+	}
+}
+
 func main() {
 	defer func() {
 		if r := recover(); r != nil {
@@ -819,12 +1197,28 @@ func main() {
 		}
 	}()
 	if len(os.Args) < 2 {
-		fmt.Println("wgmgr <init|import|add|rm|list|show|config|set-quota|renew|enable|disable|render|serve|set-login|set-base-path|ovpn-init|ovpn-add|ovpn-config|ovpn-rm> ...")
+		if isInteractive() {
+			cmdMenu()
+			return
+		}
+		printUsage()
 		os.Exit(1)
 	}
 	cmd := os.Args[1]
 	args := os.Args[2:]
 	switch cmd {
+	case "menu":
+		cmdMenu()
+	case "help", "-h", "--help":
+		printUsage()
+	case "status":
+		cmdStatus()
+	case "restart":
+		cmdRestart(args)
+	case "reinstall", "update":
+		cmdReinstall(args)
+	case "uninstall":
+		cmdUninstall(args)
 	case "init":
 		cmdInit(args)
 	case "import":

@@ -67,6 +67,11 @@ After install:
 
 ## CLI
 ```
+wgmgr                                           # interactive management menu
+wgmgr status                                    # service/config summary
+wgmgr restart [all|wgmgr|vpn|wireguard|openvpn|routing]
+wgmgr reinstall [--yes]                         # rerun latest installer/update
+wgmgr uninstall [--yes] [--purge-data] [--purge-openvpn] [--purge-wireguard]
 wgmgr add <user> [--quota-gb N] [--days D]   # create (prints client config)
 wgmgr list | show <user> | config <user>     # view / re-emit config
 wgmgr set-quota <user> <GB>
