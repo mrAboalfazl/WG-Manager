@@ -89,6 +89,8 @@ func startAPI(cfg Config, db *sql.DB) {
 	mux.HandleFunc("POST /update", a.guard(a.updateServer))
 	mux.HandleFunc("GET /migration/export", a.guard(a.exportMigration))
 	mux.HandleFunc("POST /migration/import", a.guard(a.importMigration))
+	mux.HandleFunc("GET /migration/bundle", a.guard(a.exportMigrationBundle))
+	mux.HandleFunc("POST /migration/bundle", a.guard(a.importMigrationBundle))
 	mux.HandleFunc("GET /peers/{name}/qr", a.guard(a.qrPeer))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok\n")) })
 	mux.HandleFunc("GET /peers", a.guard(a.listPeers))
@@ -206,6 +208,27 @@ func (a *api) importMigration(w http.ResponseWriter, r *http.Request) {
 		die("read import: %v", err)
 	}
 	created, updated := importMigration(a.db, a.cfg, data, true)
+	writeJSON(w, 200, map[string]any{"ok": true, "created": created, "updated": updated})
+}
+
+func (a *api) exportMigrationBundle(w http.ResponseWriter, r *http.Request) {
+	b := encodeMigrationBundle(a.db, a.cfg)
+	name := "wgmgr-migration-" + time.Now().UTC().Format("20060102-150405") + ".zip"
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+name+`"`)
+	w.Write(b)
+}
+
+func (a *api) importMigrationBundle(w http.ResponseWriter, r *http.Request) {
+	defer r.Body.Close()
+	data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 100<<20))
+	if err != nil {
+		die("read bundle: %v", err)
+	}
+	created, updated := importMigrationBundle(a.db, a.cfg, data, r.URL.Query().Get("endpoint"), true)
+	a.mu.Lock()
+	a.cfg = loadConfig()
+	a.mu.Unlock()
 	writeJSON(w, 200, map[string]any{"ok": true, "created": created, "updated": updated})
 }
 

@@ -1,11 +1,21 @@
 package main
 
 import (
+	"archive/zip"
+	"bytes"
 	"database/sql"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
+)
+
+const (
+	migrationUsersFile     = "users.json"
+	migrationManifestFile  = "manifest.json"
+	migrationBundleMaxFile = 64 << 20
 )
 
 type migrationFile struct {
@@ -34,6 +44,35 @@ type migrationPeer struct {
 	LastOvpnBytes int64  `json:"last_ovpn_bytes"`
 	OvpnCert      string `json:"ovpn_cert"`
 	OvpnKey       string `json:"ovpn_key"`
+}
+
+type migrationBundleManifest struct {
+	Version    int                        `json:"version"`
+	ExportedAt string                     `json:"exported_at"`
+	Includes   []string                   `json:"includes"`
+	WireGuard  migrationWireGuardSettings `json:"wireguard,omitempty"`
+	OpenVPN    migrationOpenVPNSettings   `json:"openvpn,omitempty"`
+}
+
+type migrationWireGuardSettings struct {
+	Interface string `json:"interface,omitempty"`
+	Endpoint  string `json:"endpoint,omitempty"`
+}
+
+type migrationOpenVPNSettings struct {
+	Subnet   string `json:"subnet,omitempty"`
+	Port     string `json:"port,omitempty"`
+	Proto    string `json:"proto,omitempty"`
+	Endpoint string `json:"endpoint,omitempty"`
+	DNS      string `json:"dns,omitempty"`
+	Mgmt     string `json:"mgmt,omitempty"`
+	MSSFix   string `json:"mssfix,omitempty"`
+	TunMTU   string `json:"tun_mtu,omitempty"`
+}
+
+type migrationBundleEntry struct {
+	data []byte
+	mode os.FileMode
 }
 
 func migrationFromDB(db *sql.DB) migrationFile {
@@ -67,6 +106,31 @@ func migrationFromDB(db *sql.DB) migrationFile {
 	return m
 }
 
+func parseParamsData(data []byte) map[string]string {
+	m := map[string]string{}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if i := strings.Index(line, "="); i > 0 {
+			m[strings.TrimSpace(line[:i])] = strings.TrimSpace(line[i+1:])
+		}
+	}
+	return m
+}
+
+func readParamsIfExists(path string) map[string]string {
+	if path == "" {
+		return map[string]string{}
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return map[string]string{}
+	}
+	return parseParamsData(b)
+}
+
 func encodeMigration(db *sql.DB) []byte {
 	b, err := json.MarshalIndent(migrationFromDB(db), "", "  ")
 	if err != nil {
@@ -86,6 +150,130 @@ func writeMigrationFile(db *sql.DB, path string) {
 	}
 	if err := os.WriteFile(path, encodeMigration(db), 0o600); err != nil {
 		die("write export: %v", err)
+	}
+}
+
+func addBundleFile(zw *zip.Writer, name string, data []byte, mode os.FileMode) {
+	h := &zip.FileHeader{Name: name, Method: zip.Deflate}
+	if mode == 0 {
+		mode = 0o600
+	}
+	h.SetMode(mode)
+	w, err := zw.CreateHeader(h)
+	if err != nil {
+		die("bundle: create %s: %v", name, err)
+	}
+	if _, err := w.Write(data); err != nil {
+		die("bundle: write %s: %v", name, err)
+	}
+}
+
+func addExistingBundleFile(zw *zip.Writer, includes *[]string, bundleName, path string, fallbackMode os.FileMode) {
+	if path == "" {
+		return
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return
+		}
+		die("bundle: read %s: %v", path, err)
+	}
+	mode := fallbackMode
+	if st, err := os.Stat(path); err == nil && st.Mode().Perm() != 0 {
+		mode = st.Mode().Perm()
+	}
+	addBundleFile(zw, bundleName, b, mode)
+	*includes = append(*includes, bundleName)
+}
+
+func buildMigrationBundleManifest(cfg Config, includes []string) migrationBundleManifest {
+	pm := readParamsIfExists(cfg.Params)
+	m := migrationBundleManifest{
+		Version:    1,
+		ExportedAt: time.Now().UTC().Format(time.RFC3339),
+		Includes:   includes,
+		WireGuard: migrationWireGuardSettings{
+			Interface: cfg.Interface,
+			Endpoint:  pm["SERVER_PUB_IP"],
+		},
+	}
+	hasOpenVPN := false
+	for _, name := range includes {
+		if strings.HasPrefix(name, "openvpn/") {
+			hasOpenVPN = true
+			break
+		}
+	}
+	if hasOpenVPN {
+		m.OpenVPN = migrationOpenVPNSettings{
+			Subnet:   cfg.OvpnSubnet,
+			Port:     cfg.OvpnPort,
+			Proto:    cfg.OvpnProto,
+			Endpoint: cfg.OvpnEndpoint,
+			DNS:      cfg.OvpnDNS,
+			Mgmt:     cfg.OvpnMgmt,
+			MSSFix:   cfg.OvpnMSSFix,
+			TunMTU:   cfg.OvpnTunMTU,
+		}
+	}
+	return m
+}
+
+func openVPNConfiguredForMigration(cfg Config) bool {
+	return cfg.OvpnDir != "" || cfg.OvpnSubnet != "" || cfg.OvpnPort != "" ||
+		cfg.OvpnProto != "" || cfg.OvpnEndpoint != "" || cfg.OvpnMgmt != ""
+}
+
+func encodeMigrationBundle(db *sql.DB, cfg Config) []byte {
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	includes := []string{migrationUsersFile}
+	addBundleFile(zw, migrationUsersFile, encodeMigration(db), 0o600)
+
+	addExistingBundleFile(zw, &includes, "wireguard/params", cfg.Params, 0o600)
+	addExistingBundleFile(zw, &includes, "wireguard/wg0.conf", cfg.WGConf, 0o600)
+
+	if openVPNConfiguredForMigration(cfg) {
+		ovpnCfg := cfg
+		ovpnDefaults(&ovpnCfg)
+		for _, item := range []struct {
+			name string
+			mode os.FileMode
+		}{
+			{"ca.crt", 0o644},
+			{"ca.key", 0o600},
+			{"server.crt", 0o644},
+			{"server.key", 0o600},
+			{"tc.key", 0o600},
+			{"server.conf", 0o644},
+		} {
+			addExistingBundleFile(zw, &includes, "openvpn/"+item.name, filepath.Join(ovpnCfg.OvpnDir, item.name), item.mode)
+		}
+	}
+
+	manifest := buildMigrationBundleManifest(cfg, includes)
+	mb, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		die("bundle: manifest: %v", err)
+	}
+	addBundleFile(zw, migrationManifestFile, append(mb, '\n'), 0o600)
+	if err := zw.Close(); err != nil {
+		die("bundle: close: %v", err)
+	}
+	return buf.Bytes()
+}
+
+func writeMigrationBundleFile(db *sql.DB, cfg Config, path string) {
+	if path == "" || path == "-" {
+		os.Stdout.Write(encodeMigrationBundle(db, cfg))
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil && filepath.Dir(path) != "." {
+		die("mkdir export dir: %v", err)
+	}
+	if err := os.WriteFile(path, encodeMigrationBundle(db, cfg), 0o600); err != nil {
+		die("write bundle: %v", err)
 	}
 }
 
@@ -151,6 +339,225 @@ func importMigration(db *sql.DB, cfg Config, data []byte, apply bool) (created, 
 	return created, updated
 }
 
+func readMigrationBundle(data []byte) (map[string]migrationBundleEntry, bool) {
+	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return nil, false
+	}
+	entries := map[string]migrationBundleEntry{}
+	for _, f := range zr.File {
+		name := filepath.ToSlash(f.Name)
+		if f.FileInfo().IsDir() || !knownMigrationBundleEntry(name) {
+			continue
+		}
+		if f.UncompressedSize64 > migrationBundleMaxFile {
+			die("bundle: %s is too large", name)
+		}
+		rc, err := f.Open()
+		if err != nil {
+			die("bundle: open %s: %v", name, err)
+		}
+		b, err := io.ReadAll(io.LimitReader(rc, migrationBundleMaxFile+1))
+		rc.Close()
+		if err != nil {
+			die("bundle: read %s: %v", name, err)
+		}
+		if len(b) > migrationBundleMaxFile {
+			die("bundle: %s is too large", name)
+		}
+		entries[name] = migrationBundleEntry{data: b, mode: f.Mode().Perm()}
+	}
+	if len(entries) == 0 {
+		die("bundle: no supported files found")
+	}
+	return entries, true
+}
+
+func knownMigrationBundleEntry(name string) bool {
+	switch name {
+	case migrationManifestFile, migrationUsersFile,
+		"wireguard/params", "wireguard/wg0.conf",
+		"openvpn/ca.crt", "openvpn/ca.key", "openvpn/server.crt",
+		"openvpn/server.key", "openvpn/tc.key", "openvpn/server.conf":
+		return true
+	default:
+		return false
+	}
+}
+
+func decodeBundleManifest(entries map[string]migrationBundleEntry) migrationBundleManifest {
+	var m migrationBundleManifest
+	if e, ok := entries[migrationManifestFile]; ok {
+		if err := json.Unmarshal(e.data, &m); err != nil {
+			die("bundle: bad manifest: %v", err)
+		}
+	}
+	if m.Version == 0 {
+		m.Version = 1
+	}
+	if m.Version != 1 {
+		die("bundle: unsupported manifest version %d", m.Version)
+	}
+	return m
+}
+
+func setParamValue(data []byte, key, value string) []byte {
+	if key == "" || value == "" {
+		return data
+	}
+	lines := strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n")
+	found := false
+	for i, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), key+"=") {
+			lines[i] = key + "=" + value
+			found = true
+		}
+	}
+	if !found {
+		if len(lines) > 0 && lines[len(lines)-1] == "" {
+			lines[len(lines)-1] = key + "=" + value
+			lines = append(lines, "")
+		} else {
+			lines = append(lines, key+"="+value)
+		}
+	}
+	out := strings.Join(lines, "\n")
+	if !strings.HasSuffix(out, "\n") {
+		out += "\n"
+	}
+	return []byte(out)
+}
+
+func applyBundleConfig(cfg *Config, manifest migrationBundleManifest, entries map[string]migrationBundleEntry, endpointOverride string) {
+	if hasBundlePrefix(entries, "wireguard/") {
+		if cfg.Interface == "" {
+			if manifest.WireGuard.Interface != "" {
+				cfg.Interface = manifest.WireGuard.Interface
+			} else {
+				cfg.Interface = "wg0"
+			}
+		}
+		if cfg.WGConf == "" {
+			cfg.WGConf = "/etc/wireguard/wg0.conf"
+		}
+		if cfg.Params == "" {
+			cfg.Params = "/etc/wireguard/params"
+		}
+	}
+	if hasBundlePrefix(entries, "openvpn/") {
+		if cfg.OvpnDir == "" {
+			cfg.OvpnDir = "/etc/openvpn"
+		}
+		if manifest.OpenVPN.Subnet != "" {
+			cfg.OvpnSubnet = manifest.OpenVPN.Subnet
+		}
+		if manifest.OpenVPN.Port != "" {
+			cfg.OvpnPort = manifest.OpenVPN.Port
+		}
+		if manifest.OpenVPN.Proto != "" {
+			cfg.OvpnProto = manifest.OpenVPN.Proto
+		}
+		if manifest.OpenVPN.DNS != "" {
+			cfg.OvpnDNS = manifest.OpenVPN.DNS
+		}
+		if manifest.OpenVPN.Mgmt != "" {
+			cfg.OvpnMgmt = manifest.OpenVPN.Mgmt
+		}
+		if manifest.OpenVPN.MSSFix != "" {
+			cfg.OvpnMSSFix = manifest.OpenVPN.MSSFix
+		}
+		if manifest.OpenVPN.TunMTU != "" {
+			cfg.OvpnTunMTU = manifest.OpenVPN.TunMTU
+		}
+		if endpointOverride != "" {
+			cfg.OvpnEndpoint = endpointOverride
+		} else if manifest.OpenVPN.Endpoint != "" {
+			cfg.OvpnEndpoint = manifest.OpenVPN.Endpoint
+		}
+		ovpnDefaults(cfg)
+	}
+}
+
+func hasBundlePrefix(entries map[string]migrationBundleEntry, prefix string) bool {
+	for name := range entries {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func restoreBundleFile(path string, e migrationBundleEntry, mode os.FileMode) {
+	if path == "" {
+		return
+	}
+	if mode == 0 {
+		mode = e.mode
+	}
+	if mode == 0 {
+		mode = 0o600
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		die("bundle: mkdir %s: %v", filepath.Dir(path), err)
+	}
+	if err := os.WriteFile(path, e.data, mode); err != nil {
+		die("bundle: restore %s: %v", path, err)
+	}
+	os.Chmod(path, mode)
+}
+
+func restoreMigrationBundleFiles(cfg Config, entries map[string]migrationBundleEntry, endpointOverride string) {
+	if e, ok := entries["wireguard/params"]; ok {
+		if endpointOverride != "" {
+			e.data = setParamValue(e.data, "SERVER_PUB_IP", endpointOverride)
+		}
+		restoreBundleFile(cfg.Params, e, e.mode)
+	} else if endpointOverride != "" && cfg.Params != "" && fileExists(cfg.Params) {
+		b, err := os.ReadFile(cfg.Params)
+		if err != nil {
+			die("bundle: read params: %v", err)
+		}
+		restoreBundleFile(cfg.Params, migrationBundleEntry{data: setParamValue(b, "SERVER_PUB_IP", endpointOverride), mode: 0o600}, 0o600)
+	}
+	if e, ok := entries["wireguard/wg0.conf"]; ok {
+		restoreBundleFile(cfg.WGConf, e, 0o600)
+	}
+	ovpnFiles := map[string]os.FileMode{
+		"ca.crt":      0o644,
+		"ca.key":      0o600,
+		"server.crt":  0o644,
+		"server.key":  0o600,
+		"tc.key":      0o600,
+		"server.conf": 0o644,
+	}
+	for name, mode := range ovpnFiles {
+		if e, ok := entries["openvpn/"+name]; ok {
+			restoreBundleFile(filepath.Join(cfg.OvpnDir, name), e, mode)
+		}
+	}
+}
+
+func importMigrationBundle(db *sql.DB, cfg Config, data []byte, endpointOverride string, apply bool) (created, updated int) {
+	endpointOverride = strings.TrimSpace(endpointOverride)
+	entries, ok := readMigrationBundle(data)
+	if !ok {
+		return importMigration(db, cfg, data, apply)
+	}
+	users, ok := entries[migrationUsersFile]
+	if !ok {
+		die("bundle: missing %s", migrationUsersFile)
+	}
+	manifest := decodeBundleManifest(entries)
+	applyBundleConfig(&cfg, manifest, entries, endpointOverride)
+	created, updated = importMigration(db, cfg, users.data, false)
+	restoreMigrationBundleFiles(cfg, entries, endpointOverride)
+	if apply {
+		saveConfig(cfg)
+		applyMigrationState(db, cfg)
+	}
+	return created, updated
+}
+
 func applyMigrationState(db *sql.DB, cfg Config) {
 	if cfg.WGConf != "" && fileExists(cfg.WGConf) {
 		renderConf(db, cfg, true)
@@ -169,5 +576,27 @@ func applyMigrationState(db *sql.DB, cfg Config) {
 			writeFileMode(ccdFile, "ifconfig-push "+p.OvpnIP+" "+ovpnMask(cfg.OvpnSubnet)+"\n", 0o644)
 			os.Chmod(ccdFile, 0o644)
 		}
+		syncOpenVPNServerUnitConfig(cfg)
+	}
+}
+
+func syncOpenVPNServerUnitConfig(cfg Config) {
+	if cfg.OvpnDir != "/etc/openvpn" {
+		return
+	}
+	src := filepath.Join(cfg.OvpnDir, "server.conf")
+	if !fileExists(src) {
+		return
+	}
+	b, err := os.ReadFile(src)
+	if err != nil {
+		die("openvpn: read server.conf: %v", err)
+	}
+	dst := filepath.Join(cfg.OvpnDir, "server", "server.conf")
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		die("openvpn: mkdir server unit dir: %v", err)
+	}
+	if err := os.WriteFile(dst, b, 0o644); err != nil {
+		die("openvpn: write server unit config: %v", err)
 	}
 }

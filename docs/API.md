@@ -89,6 +89,9 @@ POST   /update                   -> 202 { ok:true }        # run latest installe
 # Migration
 GET    /migration/export         -> application/json file  # users, keys, quota, usage, expiry
 POST   /migration/import         <export JSON> -> { ok:true, created, updated }
+GET    /migration/bundle         -> application/zip file   # users + VPN server keys/config
+POST   /migration/bundle?endpoint=<new-ip-or-host>
+                                 <bundle ZIP> -> { ok:true, created, updated }
 
 # Users
 GET    /peers                    -> { peers:[<user>,…], server:"<ip>" }
@@ -122,8 +125,10 @@ server hasn't been `ovpn-init`'d.
 - After `renew` / `recharge` / `enable`, the user is unblocked on the next enforce tick (≤3 min) and
   their **existing config reconnects automatically — no re-issue needed** (same for WG and OVPN).
 - **migration export/import** preserves user identity, quota, usage, expiry, WireGuard keys, and
-  OpenVPN identity data. The JSON contains private keys; store it securely. To keep existing client
-  config files working on a new server, migrate the server VPN keys and endpoint/DNS setup too.
+  OpenVPN identity data in a JSON file. Use **migration bundle** for fresh-server moves because the
+  ZIP also carries WireGuard/OpenVPN server identity files. `?endpoint=<new-ip-or-host>` updates the
+  restored endpoint used when the panel regenerates client configs. JSON exports and bundles contain
+  private keys; store them securely.
 
 ---
 

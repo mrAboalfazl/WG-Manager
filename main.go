@@ -815,7 +815,7 @@ func setField(args []string, usage string, apply func(db *sql.DB, p Peer, cfg Co
 }
 
 func printUsage() {
-	fmt.Println("wgmgr <menu|status|restart|update|uninstall|export-users|import-users|init|import|add|rm|list|show|config|set-quota|renew|enable|disable|render|serve|set-login|set-base-path|ovpn-init|ovpn-add|ovpn-config|ovpn-rm> ...")
+	fmt.Println("wgmgr <menu|status|restart|update|uninstall|export-users|import-users|export-bundle|import-bundle|init|import|add|rm|list|show|config|set-quota|renew|enable|disable|render|serve|set-login|set-base-path|ovpn-init|ovpn-add|ovpn-config|ovpn-rm> ...")
 	fmt.Println("uninstall flags: --yes --purge-data --purge-openvpn --purge-wireguard")
 	fmt.Println("Run `wgmgr` with no arguments on a terminal to open the management menu.")
 }
@@ -1008,6 +1008,36 @@ func cmdImportUsers(args []string) {
 	fmt.Printf("imported users: created=%d updated=%d\n", created, updated)
 }
 
+func cmdExportBundle(args []string) {
+	path := "-"
+	if len(args) > 0 {
+		path = args[0]
+	}
+	cfg := loadConfig()
+	db := openDB(cfg.DB)
+	defer db.Close()
+	writeMigrationBundleFile(db, cfg, path)
+	if path != "-" {
+		fmt.Println("exported migration bundle to", path)
+	}
+}
+
+func cmdImportBundle(args []string) {
+	pos, flags := parseFlags(args)
+	if len(pos) < 1 {
+		die("usage: wgmgr import-bundle <file.zip|file.json> [--endpoint <new-ip-or-host>] [--no-apply]")
+	}
+	data, err := os.ReadFile(pos[0])
+	if err != nil {
+		die("read bundle: %v", err)
+	}
+	cfg := loadConfig()
+	db := openDB(cfg.DB)
+	defer db.Close()
+	created, updated := importMigrationBundle(db, cfg, data, flags["endpoint"], flags["no-apply"] != "true")
+	fmt.Printf("imported migration bundle: created=%d updated=%d\n", created, updated)
+}
+
 func removePath(path string) {
 	if err := os.RemoveAll(path); err != nil && !os.IsNotExist(err) {
 		fmt.Printf("warning: remove %s: %v\n", path, err)
@@ -1146,7 +1176,9 @@ func cmdMenu() {
 		fmt.Println(" 11) Update WG-Manager")
 		fmt.Println(" 12) Export users")
 		fmt.Println(" 13) Import users")
-		fmt.Println(" 14) Uninstall")
+		fmt.Println(" 14) Export full migration bundle")
+		fmt.Println(" 15) Import full migration bundle")
+		fmt.Println(" 16) Uninstall")
 		fmt.Println("  0) Exit")
 		switch readLine(r, "Select: ") {
 		case "1":
@@ -1227,6 +1259,23 @@ func cmdMenu() {
 				cmdImportUsers([]string{path})
 			}
 		case "14":
+			path := readDefault(r, "Bundle file: ", "/root/wgmgr-migration-bundle.zip")
+			cmdExportBundle([]string{path})
+		case "15":
+			path := readLine(r, "Bundle file: ")
+			if path == "" {
+				fmt.Println("bundle file is required")
+				continue
+			}
+			endpoint := readLine(r, "New server endpoint/IP (blank to keep exported endpoint): ")
+			if confirm(r, "Import full bundle and apply WireGuard/OpenVPN state?") {
+				args := []string{path}
+				if endpoint != "" {
+					args = append(args, "--endpoint", endpoint)
+				}
+				cmdImportBundle(args)
+			}
+		case "16":
 			cmdMenuUninstall(r)
 			return
 		case "0", "q", "quit", "exit":
@@ -1272,6 +1321,10 @@ func main() {
 		cmdExportUsers(args)
 	case "import-users", "db-import", "migration-import":
 		cmdImportUsers(args)
+	case "export-bundle", "export-full", "backup":
+		cmdExportBundle(args)
+	case "import-bundle", "import-full", "restore":
+		cmdImportBundle(args)
 	case "uninstall":
 		cmdUninstall(args)
 	case "init":
