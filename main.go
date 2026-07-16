@@ -24,6 +24,7 @@ import (
 )
 
 const configPath = "/etc/wgmgr/config.json"
+const updateInstallerCommand = "curl -fsSL https://raw.githubusercontent.com/mrAboalfazl/WG-Manager/main/install.sh | bash"
 
 // peerMarker delimits the wgmgr-managed [Peer] region in wg0.conf. Everything ABOVE
 // the first marker/peer (the [Interface] block + PostUp/PostDown) is preserved verbatim.
@@ -814,7 +815,7 @@ func setField(args []string, usage string, apply func(db *sql.DB, p Peer, cfg Co
 }
 
 func printUsage() {
-	fmt.Println("wgmgr <menu|status|restart|reinstall|uninstall|init|import|add|rm|list|show|config|set-quota|renew|enable|disable|render|serve|set-login|set-base-path|ovpn-init|ovpn-add|ovpn-config|ovpn-rm> ...")
+	fmt.Println("wgmgr <menu|status|restart|update|uninstall|export-users|import-users|init|import|add|rm|list|show|config|set-quota|renew|enable|disable|render|serve|set-login|set-base-path|ovpn-init|ovpn-add|ovpn-config|ovpn-rm> ...")
 	fmt.Println("uninstall flags: --yes --purge-data --purge-openvpn --purge-wireguard")
 	fmt.Println("Run `wgmgr` with no arguments on a terminal to open the management menu.")
 }
@@ -965,10 +966,46 @@ func cmdReinstall(args []string) {
 			return
 		}
 	}
-	script := "curl -fsSL https://raw.githubusercontent.com/mrAboalfazl/WG-Manager/main/install.sh | bash"
-	if err := runInteractive("bash", "-c", script); err != nil {
+	if err := runInteractive("bash", "-c", updateInstallerCommand); err != nil {
 		die("reinstall failed: %v", err)
 	}
+}
+
+func startUpdateAsync() error {
+	return exec.Command("bash", "-c", "(sleep 1; "+updateInstallerCommand+") >/tmp/wgmgr-update.log 2>&1 &").Start()
+}
+
+func cmdExportUsers(args []string) {
+	path := "-"
+	if len(args) > 0 {
+		path = args[0]
+	}
+	cfg := loadConfig()
+	db := openDB(cfg.DB)
+	defer db.Close()
+	writeMigrationFile(db, path)
+	if path != "-" {
+		fmt.Println("exported users to", path)
+	}
+}
+
+func cmdImportUsers(args []string) {
+	if len(args) < 1 {
+		die("usage: wgmgr import-users <file> [--no-apply]")
+	}
+	pos, flags := parseFlags(args)
+	if len(pos) < 1 {
+		die("usage: wgmgr import-users <file> [--no-apply]")
+	}
+	data, err := os.ReadFile(pos[0])
+	if err != nil {
+		die("read import file: %v", err)
+	}
+	cfg := loadConfig()
+	db := openDB(cfg.DB)
+	defer db.Close()
+	created, updated := importMigration(db, cfg, data, flags["no-apply"] != "true")
+	fmt.Printf("imported users: created=%d updated=%d\n", created, updated)
 }
 
 func removePath(path string) {
@@ -1106,8 +1143,10 @@ func cmdMenu() {
 		fmt.Println("  8) List users")
 		fmt.Println("  9) Add user")
 		fmt.Println(" 10) Remove user")
-		fmt.Println(" 11) Reinstall / update WG-Manager")
-		fmt.Println(" 12) Uninstall")
+		fmt.Println(" 11) Update WG-Manager")
+		fmt.Println(" 12) Export users")
+		fmt.Println(" 13) Import users")
+		fmt.Println(" 14) Uninstall")
 		fmt.Println("  0) Exit")
 		switch readLine(r, "Select: ") {
 		case "1":
@@ -1176,6 +1215,18 @@ func cmdMenu() {
 		case "11":
 			cmdReinstall(nil)
 		case "12":
+			path := readDefault(r, "Export file: ", "/root/wgmgr-users-export.json")
+			cmdExportUsers([]string{path})
+		case "13":
+			path := readLine(r, "Import file: ")
+			if path == "" {
+				fmt.Println("import file is required")
+				continue
+			}
+			if confirm(r, "Import users and apply WireGuard/OpenVPN state?") {
+				cmdImportUsers([]string{path})
+			}
+		case "14":
 			cmdMenuUninstall(r)
 			return
 		case "0", "q", "quit", "exit":
@@ -1217,6 +1268,10 @@ func main() {
 		cmdRestart(args)
 	case "reinstall", "update":
 		cmdReinstall(args)
+	case "export", "export-users", "db-export":
+		cmdExportUsers(args)
+	case "import-users", "db-import", "migration-import":
+		cmdImportUsers(args)
 	case "uninstall":
 		cmdUninstall(args)
 	case "init":

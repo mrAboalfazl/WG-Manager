@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"io"
 	"math/big"
 	"net"
 	"net/http"
@@ -85,6 +86,9 @@ func startAPI(cfg Config, db *sql.DB) {
 	mux.HandleFunc("POST /change-password", a.guard(a.changePassword))
 	mux.HandleFunc("GET /api-token", a.guard(a.getAPIToken))
 	mux.HandleFunc("POST /api-token/regenerate", a.guard(a.regenAPIToken))
+	mux.HandleFunc("POST /update", a.guard(a.updateServer))
+	mux.HandleFunc("GET /migration/export", a.guard(a.exportMigration))
+	mux.HandleFunc("POST /migration/import", a.guard(a.importMigration))
 	mux.HandleFunc("GET /peers/{name}/qr", a.guard(a.qrPeer))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok\n")) })
 	mux.HandleFunc("GET /peers", a.guard(a.listPeers))
@@ -180,6 +184,31 @@ func (a *api) regenAPIToken(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"token": newTok})
 }
 
+func (a *api) updateServer(w http.ResponseWriter, r *http.Request) {
+	if err := startUpdateAsync(); err != nil {
+		die("start update: %v", err)
+	}
+	writeJSON(w, 202, map[string]any{"ok": true, "message": "update started; service may restart shortly"})
+}
+
+func (a *api) exportMigration(w http.ResponseWriter, r *http.Request) {
+	b := encodeMigration(a.db)
+	name := "wgmgr-users-" + time.Now().UTC().Format("20060102-150405") + ".json"
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+name+`"`)
+	w.Write(b)
+}
+
+func (a *api) importMigration(w http.ResponseWriter, r *http.Request) {
+	defer r.Body.Close()
+	data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 50<<20))
+	if err != nil {
+		die("read import: %v", err)
+	}
+	created, updated := importMigration(a.db, a.cfg, data, true)
+	writeJSON(w, 200, map[string]any{"ok": true, "created": created, "updated": updated})
+}
+
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
@@ -195,27 +224,27 @@ func readJSON(r *http.Request) map[string]any {
 }
 
 func bytesToGB(b int64) float64 { return float64(b) / (1024 * 1024 * 1024) }
-func gbToBytes(v float64) int64  { return int64(v * 1024 * 1024 * 1024) }
+func gbToBytes(v float64) int64 { return int64(v * 1024 * 1024 * 1024) }
 
 func peerJSON(p Peer) map[string]any {
 	return map[string]any{
-		"username":   p.Username,
-		"address":    p.Address,
-		"public_key": p.PublicKey,
-		"used_bytes": p.UsedBytes, // WireGuard
-		"used_gb":    bytesToGB(p.UsedBytes),
+		"username":         p.Username,
+		"address":          p.Address,
+		"public_key":       p.PublicKey,
+		"used_bytes":       p.UsedBytes, // WireGuard
+		"used_gb":          bytesToGB(p.UsedBytes),
 		"used_ovpn_bytes":  p.UsedOvpnBytes,
 		"used_ovpn_gb":     bytesToGB(p.UsedOvpnBytes),
 		"used_total_bytes": p.UsedBytes + p.UsedOvpnBytes, // WG + OVPN = what the quota measures
 		"used_total_gb":    bytesToGB(p.UsedBytes + p.UsedOvpnBytes),
-		"quota_bytes": p.QuotaBytes,
-		"quota_gb":   bytesToGB(p.QuotaBytes),
-		"expires_at": p.ExpiresAt,
-		"enabled":    p.Enabled,
-		"blocked":    p.Blocked,
-		"has_ovpn":     p.OvpnCN != "",
-		"ovpn_enabled": p.OvpnEnabled,
-		"ovpn_ip":      p.OvpnIP,
+		"quota_bytes":      p.QuotaBytes,
+		"quota_gb":         bytesToGB(p.QuotaBytes),
+		"expires_at":       p.ExpiresAt,
+		"enabled":          p.Enabled,
+		"blocked":          p.Blocked,
+		"has_ovpn":         p.OvpnCN != "",
+		"ovpn_enabled":     p.OvpnEnabled,
+		"ovpn_ip":          p.OvpnIP,
 	}
 }
 

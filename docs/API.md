@@ -84,6 +84,11 @@ POST   /login          (public)  {username,password} -> { token }   # token == t
 POST   /change-password          {current_password,new_password} -> { ok:true }
 GET    /api-token                -> { token }              # view the API token
 POST   /api-token/regenerate     -> { token }              # rotate (old token dies immediately)
+POST   /update                   -> 202 { ok:true }        # run latest installer/update in background
+
+# Migration
+GET    /migration/export         -> application/json file  # users, keys, quota, usage, expiry
+POST   /migration/import         <export JSON> -> { ok:true, created, updated }
 
 # Users
 GET    /peers                    -> { peers:[<user>,…], server:"<ip>" }
@@ -116,6 +121,9 @@ server hasn't been `ovpn-init`'d.
   N days from now (`days:0` = never); `expires_at` sets an exact date.
 - After `renew` / `recharge` / `enable`, the user is unblocked on the next enforce tick (≤3 min) and
   their **existing config reconnects automatically — no re-issue needed** (same for WG and OVPN).
+- **migration export/import** preserves user identity, quota, usage, expiry, WireGuard keys, and
+  OpenVPN identity data. The JSON contains private keys; store it securely. To keep existing client
+  config files working on a new server, migrate the server VPN keys and endpoint/DNS setup too.
 
 ---
 

@@ -293,6 +293,15 @@ function openSettings(){modal(`
   <p class="sub" style="margin-top:8px">Full-admin token for backend/API access. <b>Regenerating invalidates the old token immediately</b> — update any backend that uses it.</p>
   <button class="btn ghost" type="button" onclick="regenTok()" style="width:100%">↻ Regenerate token</button>
   <hr style="border:none;border-top:1px solid var(--line);margin:22px 0">
+  <h3>Maintenance</h3>
+  <p class="sub">Update WG-Manager, or migrate users with quota, usage, keys, expiry, and OpenVPN identity data.</p>
+  <div class="row" style="margin-top:12px"><button class="btn ghost" onclick="startUpdate()">Update</button>
+  <button class="btn ghost" onclick="exportUsers()">Export users</button></div>
+  <label style="margin-top:14px">Import users JSON</label>
+  <input id="mig-file" type="file" accept="application/json,.json">
+  <button class="btn ghost" type="button" onclick="importUsers()" style="width:100%;margin-top:10px">Import users</button>
+  <p class="sub" style="margin-top:8px">Exports contain private keys and must be stored securely. For unchanged client configs on a new server, migrate the server VPN keys and endpoint too.</p>
+  <hr style="border:none;border-top:1px solid var(--line);margin:22px 0">
   <h3>Change password</h3><p class="sub">Update your panel login password — you'll stay signed in.</p>
   <label>Current password</label><input id="cp-cur" type="password" autocomplete="current-password">
   <label style="margin-top:14px">New password</label><input id="cp-new" type="password" autocomplete="new-password">
@@ -314,6 +323,33 @@ async function regenTok(){
     const el=$('#apitok');if(el){el.type='text';el.value=_apitok;}
     toast('Token regenerated','ok');}
   catch(e){toast(e.message,'err');}
+}
+async function startUpdate(){
+  if(!confirm('Update WG-Manager now? The service may restart and the panel can disconnect for a short time.'))return;
+  try{await api('POST','/update');toast('Update started','ok');}
+  catch(e){toast(e.message,'err');}
+}
+async function exportUsers(){
+  try{
+    const r=await fetch(BASE+'/migration/export',{headers:{'Authorization':'Bearer '+TOKEN}});
+    if(!r.ok){let msg='export failed';try{const d=await r.json();msg=d.error||msg;}catch(e){}throw new Error(msg);}
+    const b=await r.blob();const a=document.createElement('a');
+    a.href=URL.createObjectURL(b);a.download='wgmgr-users-export.json';a.click();
+    toast('Users exported','ok');
+  }catch(e){toast(e.message,'err');}
+}
+async function importUsers(){
+  const f=$('#mig-file')?.files?.[0];
+  if(!f){toast('Choose a JSON file first','err');return;}
+  if(!confirm('Import users from this file? Existing users with the same username will be updated.'))return;
+  try{
+    const text=await f.text();
+    const r=await fetch(BASE+'/migration/import',{method:'POST',headers:{'Authorization':'Bearer '+TOKEN,'Content-Type':'application/json'},body:text});
+    const d=await r.json();
+    if(!r.ok)throw new Error(d.error||'import failed');
+    toast(`Imported: ${d.created||0} created, ${d.updated||0} updated`,'ok');
+    closeModal();refresh();
+  }catch(e){toast(e.message,'err');}
 }
 async function doChangePassword(){
   const cur=$('#cp-cur').value, nw=$('#cp-new').value, cnf=$('#cp-cnf').value;

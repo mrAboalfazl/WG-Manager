@@ -70,7 +70,9 @@ After install:
 wgmgr                                           # interactive management menu
 wgmgr status                                    # service/config summary
 wgmgr restart [all|wgmgr|vpn|wireguard|openvpn|routing]
-wgmgr reinstall [--yes]                         # rerun latest installer/update
+wgmgr update [--yes]                            # rerun latest installer/update
+wgmgr export-users <file.json>                  # migration export (users, keys, quota, usage)
+wgmgr import-users <file.json>                  # migration import + apply service state
 wgmgr uninstall [--yes] [--purge-data] [--purge-openvpn] [--purge-wireguard]
 wgmgr add <user> [--quota-gb N] [--days D]   # create (prints client config)
 wgmgr list | show <user> | config <user>     # view / re-emit config
@@ -84,6 +86,11 @@ wgmgr import                                  # import peers from wg0.conf into 
 wgmgr render                                  # rewrite wg0.conf peer section from DB + apply
 wgmgr serve                                   # daemon: enforcement loop + HTTPS API (systemd)
 ```
+
+The panel **Settings** screen also has **Update**, **Export users**, and **Import users** actions.
+Migration exports contain private keys and should be stored like secrets. User quota, usage, expiry,
+WireGuard identity, and OpenVPN identity data are preserved; to keep old client configs working on a
+new server, also migrate the server VPN keys and endpoint/DNS setup.
 
 ## API
 HTTPS + bearer token on `:8443`, under the **same secret web base path as the panel** (e.g.
