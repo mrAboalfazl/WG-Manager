@@ -210,6 +210,36 @@ DROPIN
   systemctl enable --now wgmgr-openvpn-routing.service >/dev/null 2>&1 || true
 }
 
+panel_port(){
+  local listen port
+  listen="$(sed -n 's/.*"api_listen"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' /etc/wgmgr/config.json 2>/dev/null | head -n 1)"
+  [ -n "$listen" ] || listen=":8443"
+  port="${listen##*:}"
+  case "$port" in
+    ''|*[!0-9]*) port="8443" ;;
+  esac
+  echo "$port"
+}
+
+allow_panel_firewall(){
+  local port opened=0
+  port="$(panel_port)"
+  say "allowing panel/API access on tcp/${port}..."
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi '^Status: active'; then
+    ufw allow "${port}/tcp" >/dev/null 2>&1 || true
+    opened=1
+  fi
+  if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet firewalld 2>/dev/null && command -v firewall-cmd >/dev/null 2>&1; then
+    firewall-cmd --permanent --add-port="${port}/tcp" >/dev/null 2>&1 || true
+    firewall-cmd --reload >/dev/null 2>&1 || true
+    opened=1
+  fi
+  if [ "$opened" = "0" ] && command -v iptables >/dev/null 2>&1; then
+    iptables -w -C INPUT -p tcp --dport "$port" -j ACCEPT 2>/dev/null \
+      || iptables -w -I INPUT 1 -p tcp --dport "$port" -j ACCEPT 2>/dev/null || true
+  fi
+}
+
 # Optional: add OpenVPN alongside WireGuard (set INSTALL_OVPN=1). Users then get a single
 # COMBINED quota across both protocols via `wgmgr ovpn-add <user>`. Overrides: OVPN_PORT /
 # OVPN_PROTO / OVPN_SUBNET / OVPN_ENDPOINT. (Generated here; validate on a real server.)
@@ -339,6 +369,7 @@ WantedBy=multi-user.target
 UNIT
 systemctl daemon-reload
 systemctl enable --now wgmgr.service
+allow_panel_firewall
 
 bootstrap_openvpn
 

@@ -64,6 +64,8 @@ After install:
 - **API token:** view or **regenerate** it from the panel's **⚙ Settings**, or read it on the server
   in `/etc/wgmgr/config.json` (`api_token`). Regenerating invalidates the old token immediately — update
   any backend that uses it.
+- **Firewall:** the installer opens the panel/API TCP port automatically for active UFW/firewalld
+  setups. The default is `8443/tcp`.
 
 ## CLI
 ```
