@@ -52,7 +52,7 @@ func TestMigrationExportImportPreservesUserState(t *testing.T) {
 	}
 }
 
-func TestMigrationBundleRestoresServerFilesAndEndpoint(t *testing.T) {
+func TestMigrationBundleRestoresServerFilesAndPreservesEndpoint(t *testing.T) {
 	srcDir := t.TempDir()
 	src := seedMigrationPeer(t, filepath.Join(srcDir, "src.db"))
 	defer src.Close()
@@ -117,7 +117,7 @@ func TestMigrationBundleRestoresServerFilesAndEndpoint(t *testing.T) {
 		DB:        filepath.Join(dstDir, "dst.db"),
 		OvpnDir:   filepath.Join(dstDir, "openvpn"),
 	}
-	created, updated := importMigrationBundle(dst, dstCfg, bundle, "new.example.com", false)
+	created, updated := importMigrationBundle(dst, dstCfg, bundle, false)
 	if created != 1 || updated != 0 {
 		t.Fatalf("created=%d updated=%d, want 1/0", created, updated)
 	}
@@ -125,8 +125,8 @@ func TestMigrationBundleRestoresServerFilesAndEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(params), "SERVER_PUB_IP=new.example.com") {
-		t.Fatalf("endpoint override not written to params:\n%s", params)
+	if !strings.Contains(string(params), "SERVER_PUB_IP=old.example.com") || !strings.Contains(string(params), "SERVER_PORT=51820") {
+		t.Fatalf("foreign WireGuard endpoint/port not preserved:\n%s", params)
 	}
 	wgConf, err := os.ReadFile(dstCfg.WGConf)
 	if err != nil {

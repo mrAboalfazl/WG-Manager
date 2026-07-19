@@ -11,6 +11,12 @@ IFACE="${WG_IFACE:-wg0}"
 say(){ printf '\033[0;36m[wgmgr]\033[0m %s\n' "$*"; }
 err(){ printf '\033[0;31m[wgmgr] %s\033[0m\n' "$*" >&2; }
 
+config_json_value(){
+  local key="$1"
+  [ -r /etc/wgmgr/config.json ] || return 0
+  sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" /etc/wgmgr/config.json | head -n 1
+}
+
 # Bootstrap a fresh native WireGuard server (only when none exists). Produces the
 # /etc/wireguard/{params,wg0.conf} format wgmgr expects. Override via WG_PORT/WG_SUBNET/WG_DNS1/WG_DNS2.
 bootstrap_wireguard(){
@@ -241,15 +247,25 @@ allow_panel_firewall(){
 }
 
 # Optional: add OpenVPN alongside WireGuard (set INSTALL_OVPN=1). Users then get a single
-# COMBINED quota across both protocols via `wgmgr ovpn-add <user>`. Overrides: OVPN_PORT /
-# OVPN_PROTO / OVPN_SUBNET / OVPN_ENDPOINT. (Generated here; validate on a real server.)
+# COMBINED quota across both protocols via `wgmgr ovpn-add <user>`. First setup accepts
+# OVPN_PORT / OVPN_PROTO / OVPN_SUBNET / OVPN_ENDPOINT. Updates preserve existing values
+# unless OVPN_RECONFIGURE=1 is set.
 bootstrap_openvpn(){
   [ "${INSTALL_OVPN:-0}" = "1" ] || return 0
   command -v openvpn >/dev/null 2>&1 || { err "openvpn not installed; skipping OVPN setup"; return 0; }
   say "setting up OpenVPN (combined-quota with WireGuard)…"
-  "${PREFIX}/wgmgr" ovpn-init ${OVPN_PORT:+--port "$OVPN_PORT"} ${OVPN_PROTO:+--proto "$OVPN_PROTO"} \
-    ${OVPN_SUBNET:+--subnet "$OVPN_SUBNET"} ${OVPN_ENDPOINT:+--endpoint "$OVPN_ENDPOINT"} \
-    || { err "wgmgr ovpn-init failed; skipping"; return 0; }
+  local already_configured=0
+  if [ -n "$(config_json_value ovpn_port)" ] || [ -n "$(config_json_value ovpn_endpoint)" ] || [ -n "$(config_json_value ovpn_subnet)" ]; then
+    already_configured=1
+  fi
+  if [ "$already_configured" = "1" ] && [ "${OVPN_RECONFIGURE:-0}" != "1" ]; then
+    say "preserving existing OpenVPN endpoint/port; set OVPN_RECONFIGURE=1 to change them"
+    "${PREFIX}/wgmgr" ovpn-init || { err "wgmgr ovpn-init failed; skipping"; return 0; }
+  else
+    "${PREFIX}/wgmgr" ovpn-init ${OVPN_PORT:+--port "$OVPN_PORT"} ${OVPN_PROTO:+--proto "$OVPN_PROTO"} \
+      ${OVPN_SUBNET:+--subnet "$OVPN_SUBNET"} ${OVPN_ENDPOINT:+--endpoint "$OVPN_ENDPOINT"} \
+      || { err "wgmgr ovpn-init failed; skipping"; return 0; }
+  fi
   install_openvpn_routing
   systemctl restart wgmgr-openvpn-routing.service >/dev/null 2>&1 || true
   # Ubuntu's canonical unit is openvpn-server@server (reads /etc/openvpn/server/server.conf);
@@ -290,7 +306,7 @@ if [ -r /dev/tty ] && [ -z "${INSTALL_OVPN+x}" ] && [ -z "${INSTALL_WG+x}" ]; th
     printf 'WireGuard UDP port [51820]: ' > /dev/tty; read -r _p < /dev/tty || _p=""
     if [ -n "$_p" ]; then WG_PORT="$_p"; fi
   fi
-  if [ "${INSTALL_OVPN:-0}" = "1" ] && [ -z "${OVPN_PORT+x}" ]; then
+  if [ "${INSTALL_OVPN:-0}" = "1" ] && [ -z "${OVPN_PORT+x}" ] && [ -z "$(config_json_value ovpn_port)" ]; then
     printf 'OpenVPN UDP port [1194]: ' > /dev/tty; read -r _p < /dev/tty || _p=""
     if [ -n "$_p" ]; then OVPN_PORT="$_p"; fi
   fi

@@ -54,6 +54,7 @@ curl -fsSL https://raw.githubusercontent.com/mrAboalfazl/WG-Manager/main/install
 | `WG_PORT` / `WG_SUBNET` | `51820` / `10.66.66.0/24` | WireGuard UDP port / subnet |
 | `OVPN_PORT` / `OVPN_PROTO` / `OVPN_SUBNET` | `1194` / `udp` / `10.8.0.0/24` | OpenVPN port / proto / subnet |
 | `OVPN_ENDPOINT` | auto-detected | public IP/host clients dial (set this if the box is behind NAT) |
+| `OVPN_RECONFIGURE` | `0` | `1` = allow an update run to change an already-configured OpenVPN endpoint/port |
 
 After install:
 - **Panel:** served on a **secret web path** printed at the end of install, e.g.
@@ -76,7 +77,7 @@ wgmgr update [--yes]                            # rerun latest installer/update
 wgmgr export-users <file.json>                  # migration export (users, keys, quota, usage)
 wgmgr import-users <file.json>                  # migration import + apply service state
 wgmgr export-bundle <file.zip>                  # full migration bundle: users + VPN server keys/config
-wgmgr import-bundle <file.zip> [--endpoint IP]  # restore bundle; override endpoint for a new server IP/DNS
+wgmgr import-bundle <file.zip>                  # restore bundle and preserve exported endpoint/ports
 wgmgr uninstall [--yes] [--purge-data] [--purge-openvpn] [--purge-wireguard]
 wgmgr add <user> [--quota-gb N] [--days D]   # create (prints client config)
 wgmgr list | show <user> | config <user>     # view / re-emit config
@@ -93,9 +94,10 @@ wgmgr serve                                   # daemon: enforcement loop + HTTPS
 
 The panel **Settings** screen also has **Update**, **Export/Import users**, and **Export/Import full
 bundle** actions. User JSON exports preserve user quota, usage, expiry, WireGuard identity, and
-OpenVPN identity data. Full bundles also include WireGuard/OpenVPN server identity files, so they can
-restore a fresh server and regenerate configs with a new endpoint/IP. Migration exports and bundles
-contain private keys and should be stored like secrets.
+OpenVPN identity data. Full bundles also include WireGuard/OpenVPN server identity files and preserve
+the exported foreign endpoint/ports. If you expose the VPN through an Iran-node tunnel, apply that
+endpoint translation in the consuming website/service, not in WG-Manager. Migration exports and
+bundles contain private keys and should be stored like secrets.
 
 ## API
 HTTPS + bearer token on `:8443`, under the **same secret web base path as the panel** (e.g.

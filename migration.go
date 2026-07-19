@@ -401,34 +401,7 @@ func decodeBundleManifest(entries map[string]migrationBundleEntry) migrationBund
 	return m
 }
 
-func setParamValue(data []byte, key, value string) []byte {
-	if key == "" || value == "" {
-		return data
-	}
-	lines := strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n")
-	found := false
-	for i, line := range lines {
-		if strings.HasPrefix(strings.TrimSpace(line), key+"=") {
-			lines[i] = key + "=" + value
-			found = true
-		}
-	}
-	if !found {
-		if len(lines) > 0 && lines[len(lines)-1] == "" {
-			lines[len(lines)-1] = key + "=" + value
-			lines = append(lines, "")
-		} else {
-			lines = append(lines, key+"="+value)
-		}
-	}
-	out := strings.Join(lines, "\n")
-	if !strings.HasSuffix(out, "\n") {
-		out += "\n"
-	}
-	return []byte(out)
-}
-
-func applyBundleConfig(cfg *Config, manifest migrationBundleManifest, entries map[string]migrationBundleEntry, endpointOverride string) {
+func applyBundleConfig(cfg *Config, manifest migrationBundleManifest, entries map[string]migrationBundleEntry) {
 	if hasBundlePrefix(entries, "wireguard/") {
 		if cfg.Interface == "" {
 			if manifest.WireGuard.Interface != "" {
@@ -469,9 +442,7 @@ func applyBundleConfig(cfg *Config, manifest migrationBundleManifest, entries ma
 		if manifest.OpenVPN.TunMTU != "" {
 			cfg.OvpnTunMTU = manifest.OpenVPN.TunMTU
 		}
-		if endpointOverride != "" {
-			cfg.OvpnEndpoint = endpointOverride
-		} else if manifest.OpenVPN.Endpoint != "" {
+		if manifest.OpenVPN.Endpoint != "" {
 			cfg.OvpnEndpoint = manifest.OpenVPN.Endpoint
 		}
 		ovpnDefaults(cfg)
@@ -506,18 +477,9 @@ func restoreBundleFile(path string, e migrationBundleEntry, mode os.FileMode) {
 	os.Chmod(path, mode)
 }
 
-func restoreMigrationBundleFiles(cfg Config, entries map[string]migrationBundleEntry, endpointOverride string) {
+func restoreMigrationBundleFiles(cfg Config, entries map[string]migrationBundleEntry) {
 	if e, ok := entries["wireguard/params"]; ok {
-		if endpointOverride != "" {
-			e.data = setParamValue(e.data, "SERVER_PUB_IP", endpointOverride)
-		}
 		restoreBundleFile(cfg.Params, e, e.mode)
-	} else if endpointOverride != "" && cfg.Params != "" && fileExists(cfg.Params) {
-		b, err := os.ReadFile(cfg.Params)
-		if err != nil {
-			die("bundle: read params: %v", err)
-		}
-		restoreBundleFile(cfg.Params, migrationBundleEntry{data: setParamValue(b, "SERVER_PUB_IP", endpointOverride), mode: 0o600}, 0o600)
 	}
 	if e, ok := entries["wireguard/wg0.conf"]; ok {
 		restoreBundleFile(cfg.WGConf, e, 0o600)
@@ -537,8 +499,7 @@ func restoreMigrationBundleFiles(cfg Config, entries map[string]migrationBundleE
 	}
 }
 
-func importMigrationBundle(db *sql.DB, cfg Config, data []byte, endpointOverride string, apply bool) (created, updated int) {
-	endpointOverride = strings.TrimSpace(endpointOverride)
+func importMigrationBundle(db *sql.DB, cfg Config, data []byte, apply bool) (created, updated int) {
 	entries, ok := readMigrationBundle(data)
 	if !ok {
 		return importMigration(db, cfg, data, apply)
@@ -548,9 +509,9 @@ func importMigrationBundle(db *sql.DB, cfg Config, data []byte, endpointOverride
 		die("bundle: missing %s", migrationUsersFile)
 	}
 	manifest := decodeBundleManifest(entries)
-	applyBundleConfig(&cfg, manifest, entries, endpointOverride)
+	applyBundleConfig(&cfg, manifest, entries)
 	created, updated = importMigration(db, cfg, users.data, false)
-	restoreMigrationBundleFiles(cfg, entries, endpointOverride)
+	restoreMigrationBundleFiles(cfg, entries)
 	if apply {
 		saveConfig(cfg)
 		applyMigrationState(db, cfg)
