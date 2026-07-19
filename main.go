@@ -1025,10 +1025,7 @@ func cmdExportBundle(args []string) {
 func cmdImportBundle(args []string) {
 	pos, flags := parseFlags(args)
 	if len(pos) < 1 {
-		die("usage: wgmgr import-bundle <file.zip|file.json> [--no-apply]")
-	}
-	if flags["endpoint"] != "" {
-		die("--endpoint is not supported; keep WG-Manager on the foreign server endpoint and apply tunnel mapping in the consuming service")
+		die("usage: wgmgr import-bundle <file.zip|file.json> [--endpoint <new-server-ip-or-host>] [--no-apply]")
 	}
 	data, err := os.ReadFile(pos[0])
 	if err != nil {
@@ -1037,7 +1034,7 @@ func cmdImportBundle(args []string) {
 	cfg := loadConfig()
 	db := openDB(cfg.DB)
 	defer db.Close()
-	created, updated := importMigrationBundle(db, cfg, data, flags["no-apply"] != "true")
+	created, updated := importMigrationBundle(db, cfg, data, flags["endpoint"], flags["no-apply"] != "true")
 	fmt.Printf("imported migration bundle: created=%d updated=%d\n", created, updated)
 }
 
@@ -1270,8 +1267,13 @@ func cmdMenu() {
 				fmt.Println("bundle file is required")
 				continue
 			}
+			endpoint := readLine(r, "New server endpoint/IP (blank uses this server config): ")
 			if confirm(r, "Import full bundle and apply WireGuard/OpenVPN state?") {
-				cmdImportBundle([]string{path})
+				args := []string{path}
+				if endpoint != "" {
+					args = append(args, "--endpoint", endpoint)
+				}
+				cmdImportBundle(args)
 			}
 		case "16":
 			cmdMenuUninstall(r)

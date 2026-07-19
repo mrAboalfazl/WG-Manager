@@ -77,7 +77,7 @@ wgmgr update [--yes]                            # rerun latest installer/update
 wgmgr export-users <file.json>                  # migration export (users, keys, quota, usage)
 wgmgr import-users <file.json>                  # migration import + apply service state
 wgmgr export-bundle <file.zip>                  # full migration bundle: users + VPN server keys/config
-wgmgr import-bundle <file.zip>                  # restore bundle and preserve exported endpoint/ports
+wgmgr import-bundle <file.zip> [--endpoint IP]  # restore bundle using the new server endpoint/ports
 wgmgr uninstall [--yes] [--purge-data] [--purge-openvpn] [--purge-wireguard]
 wgmgr add <user> [--quota-gb N] [--days D]   # create (prints client config)
 wgmgr list | show <user> | config <user>     # view / re-emit config
@@ -94,9 +94,10 @@ wgmgr serve                                   # daemon: enforcement loop + HTTPS
 
 The panel **Settings** screen also has **Update**, **Export/Import users**, and **Export/Import full
 bundle** actions. User JSON exports preserve user quota, usage, expiry, WireGuard identity, and
-OpenVPN identity data. Full bundles also include WireGuard/OpenVPN server identity files and preserve
-the exported foreign endpoint/ports. If you expose the VPN through an Iran-node tunnel, apply that
-endpoint translation in the consuming website/service, not in WG-Manager. Migration exports and
+OpenVPN identity data. Full bundles also include WireGuard/OpenVPN server identity files. On import,
+WG-Manager keeps the old VPN keys but uses the destination server endpoint/ports, or the explicit
+`--endpoint` value. If you expose the VPN through an Iran-node tunnel during normal operation, apply
+that endpoint translation in the consuming website/service, not in WG-Manager. Migration exports and
 bundles contain private keys and should be stored like secrets.
 
 ## API

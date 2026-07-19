@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -74,6 +75,19 @@ type migrationBundleEntry struct {
 	data []byte
 	mode os.FileMode
 }
+
+type migrationDestination struct {
+	WGEndpoint   string
+	WGPort       string
+	OvpnEndpoint string
+	OvpnPort     string
+	OvpnProto    string
+}
+
+var (
+	wgListenPortRE = regexp.MustCompile(`(?m)^(\s*ListenPort\s*=\s*)[0-9]+`)
+	wgDPortRE      = regexp.MustCompile(`(--dport[ \t]+)[0-9]+`)
+)
 
 func migrationFromDB(db *sql.DB) migrationFile {
 	m := migrationFile{
@@ -401,7 +415,59 @@ func decodeBundleManifest(entries map[string]migrationBundleEntry) migrationBund
 	return m
 }
 
-func applyBundleConfig(cfg *Config, manifest migrationBundleManifest, entries map[string]migrationBundleEntry) {
+func currentMigrationDestination(cfg Config) migrationDestination {
+	var d migrationDestination
+	if cfg.Params != "" && fileExists(cfg.Params) {
+		pm := parseParams(cfg.Params)
+		d.WGEndpoint = pm["SERVER_PUB_IP"]
+		d.WGPort = pm["SERVER_PORT"]
+	}
+	d.OvpnEndpoint = cfg.OvpnEndpoint
+	d.OvpnPort = cfg.OvpnPort
+	d.OvpnProto = cfg.OvpnProto
+	if d.OvpnEndpoint == "" {
+		d.OvpnEndpoint = d.WGEndpoint
+	}
+	return d
+}
+
+func setParamValue(data []byte, key, value string) []byte {
+	if key == "" || value == "" {
+		return data
+	}
+	lines := strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n")
+	found := false
+	for i, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), key+"=") {
+			lines[i] = key + "=" + value
+			found = true
+		}
+	}
+	if !found {
+		if len(lines) > 0 && lines[len(lines)-1] == "" {
+			lines[len(lines)-1] = key + "=" + value
+			lines = append(lines, "")
+		} else {
+			lines = append(lines, key+"="+value)
+		}
+	}
+	out := strings.Join(lines, "\n")
+	if !strings.HasSuffix(out, "\n") {
+		out += "\n"
+	}
+	return []byte(out)
+}
+
+func setWireGuardListenPort(data []byte, port string) []byte {
+	if port == "" {
+		return data
+	}
+	out := wgListenPortRE.ReplaceAll(data, []byte("${1}"+port))
+	out = wgDPortRE.ReplaceAll(out, []byte("${1}"+port))
+	return out
+}
+
+func applyBundleConfig(cfg *Config, manifest migrationBundleManifest, entries map[string]migrationBundleEntry, dest migrationDestination) {
 	if hasBundlePrefix(entries, "wireguard/") {
 		if cfg.Interface == "" {
 			if manifest.WireGuard.Interface != "" {
@@ -424,10 +490,14 @@ func applyBundleConfig(cfg *Config, manifest migrationBundleManifest, entries ma
 		if manifest.OpenVPN.Subnet != "" {
 			cfg.OvpnSubnet = manifest.OpenVPN.Subnet
 		}
-		if manifest.OpenVPN.Port != "" {
+		if dest.OvpnPort != "" {
+			cfg.OvpnPort = dest.OvpnPort
+		} else if cfg.OvpnPort == "" && manifest.OpenVPN.Port != "" {
 			cfg.OvpnPort = manifest.OpenVPN.Port
 		}
-		if manifest.OpenVPN.Proto != "" {
+		if dest.OvpnProto != "" {
+			cfg.OvpnProto = dest.OvpnProto
+		} else if cfg.OvpnProto == "" && manifest.OpenVPN.Proto != "" {
 			cfg.OvpnProto = manifest.OpenVPN.Proto
 		}
 		if manifest.OpenVPN.DNS != "" {
@@ -442,7 +512,9 @@ func applyBundleConfig(cfg *Config, manifest migrationBundleManifest, entries ma
 		if manifest.OpenVPN.TunMTU != "" {
 			cfg.OvpnTunMTU = manifest.OpenVPN.TunMTU
 		}
-		if manifest.OpenVPN.Endpoint != "" {
+		if dest.OvpnEndpoint != "" {
+			cfg.OvpnEndpoint = dest.OvpnEndpoint
+		} else if cfg.OvpnEndpoint == "" && manifest.OpenVPN.Endpoint != "" {
 			cfg.OvpnEndpoint = manifest.OpenVPN.Endpoint
 		}
 		ovpnDefaults(cfg)
@@ -477,11 +549,20 @@ func restoreBundleFile(path string, e migrationBundleEntry, mode os.FileMode) {
 	os.Chmod(path, mode)
 }
 
-func restoreMigrationBundleFiles(cfg Config, entries map[string]migrationBundleEntry) {
+func restoreMigrationBundleFiles(cfg Config, entries map[string]migrationBundleEntry, dest migrationDestination) {
 	if e, ok := entries["wireguard/params"]; ok {
+		if dest.WGEndpoint != "" {
+			e.data = setParamValue(e.data, "SERVER_PUB_IP", dest.WGEndpoint)
+		}
+		if dest.WGPort != "" {
+			e.data = setParamValue(e.data, "SERVER_PORT", dest.WGPort)
+		}
 		restoreBundleFile(cfg.Params, e, e.mode)
 	}
 	if e, ok := entries["wireguard/wg0.conf"]; ok {
+		if dest.WGPort != "" {
+			e.data = setWireGuardListenPort(e.data, dest.WGPort)
+		}
 		restoreBundleFile(cfg.WGConf, e, 0o600)
 	}
 	ovpnFiles := map[string]os.FileMode{
@@ -499,7 +580,7 @@ func restoreMigrationBundleFiles(cfg Config, entries map[string]migrationBundleE
 	}
 }
 
-func importMigrationBundle(db *sql.DB, cfg Config, data []byte, apply bool) (created, updated int) {
+func importMigrationBundle(db *sql.DB, cfg Config, data []byte, endpointOverride string, apply bool) (created, updated int) {
 	entries, ok := readMigrationBundle(data)
 	if !ok {
 		return importMigration(db, cfg, data, apply)
@@ -509,10 +590,19 @@ func importMigrationBundle(db *sql.DB, cfg Config, data []byte, apply bool) (cre
 		die("bundle: missing %s", migrationUsersFile)
 	}
 	manifest := decodeBundleManifest(entries)
-	applyBundleConfig(&cfg, manifest, entries)
+	dest := currentMigrationDestination(cfg)
+	endpointOverride = strings.TrimSpace(endpointOverride)
+	if endpointOverride != "" {
+		dest.WGEndpoint = endpointOverride
+		dest.OvpnEndpoint = endpointOverride
+	}
+	applyBundleConfig(&cfg, manifest, entries, dest)
 	created, updated = importMigration(db, cfg, users.data, false)
-	restoreMigrationBundleFiles(cfg, entries)
+	restoreMigrationBundleFiles(cfg, entries, dest)
 	if apply {
+		if hasBundlePrefix(entries, "openvpn/") {
+			writeFileMode(filepath.Join(cfg.OvpnDir, "server.conf"), ovpnServerConf(cfg), 0o644)
+		}
 		saveConfig(cfg)
 		applyMigrationState(db, cfg)
 	}

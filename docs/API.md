@@ -90,7 +90,8 @@ POST   /update                   -> 202 { ok:true }        # run latest installe
 GET    /migration/export         -> application/json file  # users, keys, quota, usage, expiry
 POST   /migration/import         <export JSON> -> { ok:true, created, updated }
 GET    /migration/bundle         -> application/zip file   # users + VPN server keys/config
-POST   /migration/bundle         <bundle ZIP> -> { ok:true, created, updated }
+POST   /migration/bundle?endpoint=<new-server-ip-or-host>
+                                 <bundle ZIP> -> { ok:true, created, updated }
 
 # Users
 GET    /peers                    -> { peers:[<user>,…], server:"<ip>" }
@@ -125,10 +126,11 @@ server hasn't been `ovpn-init`'d.
   their **existing config reconnects automatically — no re-issue needed** (same for WG and OVPN).
 - **migration export/import** preserves user identity, quota, usage, expiry, WireGuard keys, and
   OpenVPN identity data in a JSON file. Use **migration bundle** for fresh-server moves because the
-  ZIP also carries WireGuard/OpenVPN server identity files and preserves the exported foreign
-  endpoint/ports. If an Iran-node tunnel fronts the VPN, translate endpoints in the consuming
-  website/service; WG-Manager should keep its own foreign-server values. JSON exports and bundles
-  contain private keys; store them securely.
+  ZIP also carries WireGuard/OpenVPN server identity files. On import, WG-Manager keeps the old VPN
+  keys but uses the destination server endpoint/ports, or the explicit `endpoint` query value. If an
+  Iran-node tunnel fronts the VPN during normal operation, translate endpoints in the consuming
+  website/service; tunnel creation should not mutate WG-Manager's stored server endpoint/ports. JSON
+  exports and bundles contain private keys; store them securely.
 
 ---
 

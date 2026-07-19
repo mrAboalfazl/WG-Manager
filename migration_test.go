@@ -52,7 +52,7 @@ func TestMigrationExportImportPreservesUserState(t *testing.T) {
 	}
 }
 
-func TestMigrationBundleRestoresServerFilesAndPreservesEndpoint(t *testing.T) {
+func TestMigrationBundleRestoresServerFilesAndUsesDestinationEndpoint(t *testing.T) {
 	srcDir := t.TempDir()
 	src := seedMigrationPeer(t, filepath.Join(srcDir, "src.db"))
 	defer src.Close()
@@ -70,10 +70,10 @@ func TestMigrationBundleRestoresServerFilesAndPreservesEndpoint(t *testing.T) {
 		OvpnMgmt:     "unix:/run/wgmgr/ovpn.sock",
 		OvpnMSSFix:   "1360",
 	}
-	if err := os.WriteFile(srcCfg.Params, []byte("SERVER_PUB_IP=old.example.com\nSERVER_PORT=51820\nSERVER_PUB_KEY=serverpub\n"), 0o600); err != nil {
+	if err := os.WriteFile(srcCfg.Params, []byte("SERVER_PUB_IP=old.example.com\nSERVER_PORT=1111\nSERVER_PUB_KEY=serverpub\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(srcCfg.WGConf, []byte("[Interface]\nPrivateKey = old-server-private\nAddress = 10.66.66.1/24\n"), 0o600); err != nil {
+	if err := os.WriteFile(srcCfg.WGConf, []byte("[Interface]\nPrivateKey = old-server-private\nAddress = 10.66.66.1/24\nListenPort = 1111\nPostUp = iptables -I INPUT -p udp --dport 1111 -j ACCEPT\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.MkdirAll(srcCfg.OvpnDir, 0o755); err != nil {
@@ -111,13 +111,19 @@ func TestMigrationBundleRestoresServerFilesAndPreservesEndpoint(t *testing.T) {
 	dst := openDB(filepath.Join(dstDir, "dst.db"))
 	defer dst.Close()
 	dstCfg := Config{
-		Interface: "wg0",
-		WGConf:    filepath.Join(dstDir, "wg0.conf"),
-		Params:    filepath.Join(dstDir, "params"),
-		DB:        filepath.Join(dstDir, "dst.db"),
-		OvpnDir:   filepath.Join(dstDir, "openvpn"),
+		Interface:    "wg0",
+		WGConf:       filepath.Join(dstDir, "wg0.conf"),
+		Params:       filepath.Join(dstDir, "params"),
+		DB:           filepath.Join(dstDir, "dst.db"),
+		OvpnDir:      filepath.Join(dstDir, "openvpn"),
+		OvpnEndpoint: "dest-ovpn.example.com",
+		OvpnPort:     "30001",
+		OvpnProto:    "udp",
 	}
-	created, updated := importMigrationBundle(dst, dstCfg, bundle, false)
+	if err := os.WriteFile(dstCfg.Params, []byte("SERVER_PUB_IP=detected.example.com\nSERVER_PORT=2222\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	created, updated := importMigrationBundle(dst, dstCfg, bundle, "new.example.com", false)
 	if created != 1 || updated != 0 {
 		t.Fatalf("created=%d updated=%d, want 1/0", created, updated)
 	}
@@ -125,15 +131,15 @@ func TestMigrationBundleRestoresServerFilesAndPreservesEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(params), "SERVER_PUB_IP=old.example.com") || !strings.Contains(string(params), "SERVER_PORT=51820") {
-		t.Fatalf("foreign WireGuard endpoint/port not preserved:\n%s", params)
+	if !strings.Contains(string(params), "SERVER_PUB_IP=new.example.com") || !strings.Contains(string(params), "SERVER_PORT=2222") {
+		t.Fatalf("destination WireGuard endpoint/port not applied:\n%s", params)
 	}
 	wgConf, err := os.ReadFile(dstCfg.WGConf)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(wgConf), "old-server-private") {
-		t.Fatalf("WireGuard server identity not restored:\n%s", wgConf)
+	if !strings.Contains(string(wgConf), "old-server-private") || !strings.Contains(string(wgConf), "ListenPort = 2222") || !strings.Contains(string(wgConf), "--dport 2222") {
+		t.Fatalf("WireGuard identity/port not restored correctly:\n%s", wgConf)
 	}
 	caKey, err := os.ReadFile(filepath.Join(dstCfg.OvpnDir, "ca.key"))
 	if err != nil {

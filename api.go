@@ -221,14 +221,11 @@ func (a *api) exportMigrationBundle(w http.ResponseWriter, r *http.Request) {
 
 func (a *api) importMigrationBundle(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
-	if r.URL.Query().Get("endpoint") != "" {
-		die("endpoint override is not supported; keep WG-Manager on the foreign server endpoint and apply tunnel mapping in the consuming service")
-	}
 	data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 100<<20))
 	if err != nil {
 		die("read bundle: %v", err)
 	}
-	created, updated := importMigrationBundle(a.db, a.cfg, data, true)
+	created, updated := importMigrationBundle(a.db, a.cfg, data, r.URL.Query().Get("endpoint"), true)
 	a.mu.Lock()
 	a.cfg = loadConfig()
 	a.mu.Unlock()

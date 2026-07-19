@@ -303,8 +303,10 @@ function openSettings(){modal(`
   <button class="btn ghost" type="button" onclick="importUsers()" style="width:100%;margin-top:10px">Import users</button>
   <label style="margin-top:14px">Import full bundle ZIP</label>
   <input id="bundle-file" type="file" accept="application/zip,.zip">
+  <label style="margin-top:14px">New server endpoint/IP</label>
+  <input id="bundle-endpoint" placeholder="blank uses this server config">
   <button class="btn ghost" type="button" onclick="importBundle()" style="width:100%;margin-top:10px">Import full bundle</button>
-  <p class="sub" style="margin-top:8px">Bundles include VPN private keys and CA material. WG-Manager keeps the exported foreign endpoint and VPN ports; tunnel endpoint mapping belongs in the consuming website/service.</p>
+  <p class="sub" style="margin-top:8px">Bundles include VPN private keys and CA material. Use the new server's real VPN endpoint here; do not enter an Iran-node tunnel endpoint unless the panel is installed there.</p>
   <hr style="border:none;border-top:1px solid var(--line);margin:22px 0">
   <h3>Change password</h3><p class="sub">Update your panel login password — you'll stay signed in.</p>
   <label>Current password</label><input id="cp-cur" type="password" autocomplete="current-password">
@@ -367,9 +369,14 @@ async function exportBundle(){
 async function importBundle(){
   const f=$('#bundle-file')?.files?.[0];
   if(!f){toast('Choose a ZIP bundle first','err');return;}
-  if(!confirm('Import this full migration bundle? Existing users with the same username will be updated.'))return;
+  const endpoint=($('#bundle-endpoint')?.value||'').trim();
+  const msg=endpoint
+    ? `Import this full migration bundle and use ${endpoint} as the new server endpoint?`
+    : 'Import this full migration bundle and use this server config for endpoint/ports? Existing users with the same username will be updated.';
+  if(!confirm(msg))return;
   try{
-    const r=await fetch(BASE+'/migration/bundle',{method:'POST',headers:{'Authorization':'Bearer '+TOKEN},body:f});
+    const url=BASE+'/migration/bundle'+(endpoint?('?endpoint='+encodeURIComponent(endpoint)):'');
+    const r=await fetch(url,{method:'POST',headers:{'Authorization':'Bearer '+TOKEN},body:f});
     const d=await r.json();
     if(!r.ok)throw new Error(d.error||'bundle import failed');
     toast(`Bundle imported: ${d.created||0} created, ${d.updated||0} updated`,'ok');
