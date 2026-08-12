@@ -2,59 +2,114 @@ package main
 
 import (
 	"bufio"
+	"fmt"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 	"time"
 )
 
-// parseOvpnStatus parses OpenVPN's `status 2` (machine-readable) output and returns a map
-// of Common Name -> total bytes transferred this session (received + sent). OpenVPN's
-// per-client counters reset on reconnect, so callers must carry deltas over the same way
-// the WireGuard path does. Header/title/routing lines are ignored; only CLIENT_LIST rows
-// count. A CN that appears more than once (multiple devices) is summed.
+// defaultOvpnStatus is where the shipped systemd unit points OpenVPN's --status file
+// (`--status /run/openvpn/server.status 10`). Used when cfg.OvpnStatus is unset so existing
+// installs get the robust file-based reader without a config migration.
+const defaultOvpnStatus = "/run/openvpn/server.status"
+
+// parseOvpnStatus parses OpenVPN status output and returns Common Name -> total bytes
+// transferred this session (received + sent). It accepts BOTH machine formats so the same
+// code works against the management socket and the on-disk status file:
 //
-// CLIENT_LIST layout:
+//   - status-version 2 / `status 2` (management socket): rows are
+//     "CLIENT_LIST,<cn>,<real>,<virt>,<virt6>,<rx>,<tx>,<since>,..." — bytes at fields 5,6.
+//   - status-version 1 (the plain `--status` file): a
+//     "Common Name,Real Address,Bytes Received,Bytes Sent,Connected Since" header followed by
+//     "<cn>,<real>,<rx>,<tx>,<since>" rows until ROUTING TABLE / GLOBAL STATS — bytes at 2,3.
 //
-//	CLIENT_LIST,<Common Name>,<Real Address>,<Virtual Addr>,<Virtual IPv6>,<Bytes Recv>,<Bytes Sent>,...
+// OpenVPN's per-client counters reset on reconnect, so callers must carry deltas over the same
+// way the WireGuard path does. A CN that appears more than once (multiple devices) is summed;
+// header/title/routing lines and UNDEF (unauthenticated) clients are ignored.
 func parseOvpnStatus(out string) map[string]int64 {
 	m := map[string]int64{}
+	inV1Clients := false // true while inside the v1 file's "CLIENT LIST" section
 	for _, line := range strings.Split(out, "\n") {
-		f := strings.Split(strings.TrimRight(line, "\r"), ",")
-		if len(f) < 7 || f[0] != "CLIENT_LIST" {
-			continue
+		line = strings.TrimRight(line, "\r")
+		f := strings.Split(line, ",")
+		switch {
+		case len(f) >= 7 && f[0] == "CLIENT_LIST": // v2 (management socket)
+			addOvpnBytes(m, f[1], f[5], f[6])
+		case len(f) >= 5 && f[0] == "Common Name" && f[2] == "Bytes Received": // v1 client header
+			inV1Clients = true
+		case f[0] == "ROUTING TABLE" || f[0] == "GLOBAL STATS" || f[0] == "END":
+			inV1Clients = false
+		case inV1Clients && len(f) >= 4: // v1 client row
+			addOvpnBytes(m, f[0], f[2], f[3])
 		}
-		cn := strings.TrimSpace(f[1])
-		if cn == "" || cn == "UNDEF" {
-			continue
-		}
-		rx, _ := strconv.ParseInt(strings.TrimSpace(f[5]), 10, 64)
-		tx, _ := strconv.ParseInt(strings.TrimSpace(f[6]), 10, 64)
-		m[cn] += rx + tx
 	}
 	return m
 }
 
-// ovpnUsage dials the OpenVPN management interface, asks for `status 2`, and returns
-// CN -> total session bytes. mgmt is "unix:/run/wgmgr/ovpn.sock" or "host:port". An empty
-// address or any error yields an empty map — OpenVPN simply contributes no usage this tick
-// (so a WG-only install behaves exactly as before).
-func ovpnUsage(mgmt string) map[string]int64 {
-	if mgmt == "" {
-		return map[string]int64{}
+func addOvpnBytes(m map[string]int64, cn, rxStr, txStr string) {
+	cn = strings.TrimSpace(cn)
+	if cn == "" || cn == "UNDEF" {
+		return
 	}
+	rx, _ := strconv.ParseInt(strings.TrimSpace(rxStr), 10, 64)
+	tx, _ := strconv.ParseInt(strings.TrimSpace(txStr), 10, 64)
+	m[cn] += rx + tx
+}
+
+// ovpnUsage returns Common Name -> total session bytes for every OpenVPN client, for the
+// enforce loop to delta-accumulate. It prefers OpenVPN's --status FILE (cfg.OvpnStatus, or the
+// shipped default): the file has no single-client limit and is rewritten every few seconds, so
+// it can't be wedged the way the management socket can (the socket accepts one client at a time
+// and a single stuck session makes every later connect() return ECONNREFUSED — which silently
+// froze usage accounting in the field). The management socket is kept as a fallback.
+//
+// Returns an empty map when OVPN isn't configured. When OVPN IS configured but no source can be
+// read, it logs to stderr — a stalled reader must be visible, not look like "no traffic".
+func ovpnUsage(cfg Config) map[string]int64 {
+	if cfg.OvpnMgmt == "" && cfg.OvpnStatus == "" {
+		return map[string]int64{} // OVPN usage tracking off — WG-only install, unchanged behavior
+	}
+	statusFile := cfg.OvpnStatus
+	if statusFile == "" {
+		statusFile = defaultOvpnStatus
+	}
+	// Primary: the status file. A readable file is authoritative even when it lists zero
+	// clients (nobody connected) — we do NOT fall through to the socket in that case.
+	if b, err := os.ReadFile(statusFile); err == nil {
+		return parseOvpnStatus(string(b))
+	}
+	// Fallback: the management socket (older installs without a readable status file).
+	if cfg.OvpnMgmt != "" {
+		if m, err := ovpnUsageMgmt(cfg.OvpnMgmt); err == nil {
+			return m
+		} else {
+			fmt.Fprintf(os.Stderr, "ovpn: usage read failed (status file %q unreadable, mgmt %q: %v) — OpenVPN usage NOT counted this tick\n", statusFile, cfg.OvpnMgmt, err)
+		}
+	} else {
+		fmt.Fprintf(os.Stderr, "ovpn: status file %q unreadable and no mgmt socket configured — OpenVPN usage NOT counted this tick\n", statusFile)
+	}
+	return map[string]int64{}
+}
+
+// ovpnUsageMgmt dials the OpenVPN management interface, asks for `status 2`, and returns
+// CN -> total session bytes. mgmt is "unix:/run/wgmgr/ovpn.sock" or "host:port". Unlike the old
+// version it surfaces errors to the caller instead of swallowing them, so a broken socket is
+// logged rather than silently zeroing usage.
+func ovpnUsageMgmt(mgmt string) (map[string]int64, error) {
 	network, addr := "tcp", mgmt
 	if strings.HasPrefix(mgmt, "unix:") {
 		network, addr = "unix", strings.TrimPrefix(mgmt, "unix:")
 	}
 	conn, err := net.DialTimeout(network, addr, 3*time.Second)
 	if err != nil {
-		return map[string]int64{}
+		return nil, err
 	}
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 	if _, err := conn.Write([]byte("status 2\n")); err != nil {
-		return map[string]int64{}
+		return nil, err
 	}
 	var b strings.Builder
 	sc := bufio.NewScanner(conn)
@@ -67,6 +122,9 @@ func ovpnUsage(mgmt string) map[string]int64 {
 			break
 		}
 	}
+	if err := sc.Err(); err != nil {
+		return nil, err
+	}
 	conn.Write([]byte("quit\n"))
-	return parseOvpnStatus(b.String())
+	return parseOvpnStatus(b.String()), nil
 }

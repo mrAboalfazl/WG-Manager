@@ -75,7 +75,7 @@ func effectiveBlocked(p Peer, now time.Time) bool {
 func enforceTick(db *sql.DB, cfg Config) {
 	ensureIPSet(cfg)
 	tr := wgTransfer(cfg.Interface)
-	ov := ovpnUsage(cfg.OvpnMgmt) // CN -> session bytes; empty map when OVPN is not configured
+	ov := ovpnUsage(cfg) // CN -> session bytes; empty map when OVPN is not configured
 	now := time.Now().UTC()
 	nowStr := now.Format(time.RFC3339)
 	for _, p := range allPeers(db) {

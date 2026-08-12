@@ -45,7 +45,8 @@ type Config struct {
 	IPSet         string `json:"ipset_name"`
 	AdminUser     string `json:"admin_user"`
 	AdminPassHash string `json:"admin_pass_hash"`
-	OvpnMgmt      string `json:"ovpn_mgmt"` // OpenVPN management address (unix:/path or host:port); "" = OVPN usage tracking off
+	OvpnMgmt      string `json:"ovpn_mgmt"`   // OpenVPN management address (unix:/path or host:port); "" = OVPN usage tracking off
+	OvpnStatus    string `json:"ovpn_status"` // OpenVPN --status file path (primary usage source); "" = shipped default when OVPN is on
 	OvpnDir       string `json:"ovpn_dir"`
 	OvpnSubnet    string `json:"ovpn_subnet"`
 	OvpnPort      string `json:"ovpn_port"`
