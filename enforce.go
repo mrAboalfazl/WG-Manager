@@ -6,8 +6,15 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
+
+// enforceMu serializes enforcement passes. The background serve loop and the
+// on-demand reconcile triggered by panel mutations (renew/quota/enable/disable)
+// and the Settings → Sync button both call enforceTick; the lock stops them
+// from overlapping and double-counting usage deltas.
+var enforceMu sync.Mutex
 
 // wgTransfer returns pubkey -> {rx,tx} cumulative byte counters (since interface up).
 func wgTransfer(iface string) map[string][2]int64 {
@@ -73,6 +80,8 @@ func effectiveBlocked(p Peer, now time.Time) bool {
 // enforceTick: update cumulative usage (delta carry-over, survives counter resets) and
 // sync the block ipset to the set of peers that should be blocked.
 func enforceTick(db *sql.DB, cfg Config) {
+	enforceMu.Lock()
+	defer enforceMu.Unlock()
 	ensureIPSet(cfg)
 	tr := wgTransfer(cfg.Interface)
 	ov := ovpnUsage(cfg) // CN -> session bytes; empty map when OVPN is not configured

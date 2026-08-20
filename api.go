@@ -103,6 +103,7 @@ func startAPI(cfg Config, db *sql.DB) {
 	mux.HandleFunc("POST /peers/{name}/quota", a.guard(a.setQuota))
 	mux.HandleFunc("POST /peers/{name}/enable", a.guard(a.enableH))
 	mux.HandleFunc("POST /peers/{name}/disable", a.guard(a.disableH))
+	mux.HandleFunc("POST /sync", a.guard(a.syncH))
 	mux.HandleFunc("POST /peers/{name}/ovpn", a.guard(a.ovpnAddH))
 	mux.HandleFunc("GET /peers/{name}/ovpn-config", a.guard(a.ovpnConfigH))
 	mux.HandleFunc("DELETE /peers/{name}/ovpn", a.guard(a.ovpnRemoveH))
@@ -383,6 +384,23 @@ func (a *api) getConfig(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(clientConfig(a.db, a.cfg, p)))
 }
 
+// enforceNow reconciles enforcement immediately so a panel change (renew, quota,
+// enable/disable) takes effect on the live tunnel within milliseconds instead of
+// waiting up to one enforce interval (default 180s) for the background loop. It
+// recomputes every peer's blocked state and syncs the block ipset accordingly.
+// Wrapped in recover so a reconcile failure can never break the API response.
+func (a *api) enforceNow() {
+	defer func() { _ = recover() }()
+	enforceTick(a.db, a.cfg)
+}
+
+// syncH is the Settings → Sync button: run a full enforcement reconcile on demand
+// so any drift between the database and the live tunnel is corrected immediately.
+func (a *api) syncH(w http.ResponseWriter, r *http.Request) {
+	a.enforceNow()
+	writeJSON(w, 200, map[string]any{"ok": true, "synced_at": nowUTC()})
+}
+
 func (a *api) recharge(w http.ResponseWriter, r *http.Request) {
 	p := a.mustPeer(r)
 	m := readJSON(r)
@@ -395,6 +413,7 @@ func (a *api) recharge(w http.ResponseWriter, r *http.Request) {
 	if v, ok := m["add_gb"].(float64); ok {
 		a.db.Exec("UPDATE peers SET quota_bytes=quota_bytes+?,updated_at=? WHERE id=?", gbToBytes(v), nowUTC(), p.ID)
 	}
+	a.enforceNow() // apply the change to the live tunnel now, don't wait for the next tick
 	writeJSON(w, 200, peerJSON(a.mustPeer(r)))
 }
 
@@ -422,6 +441,7 @@ func (a *api) renew(w http.ResponseWriter, r *http.Request) {
 		die("renew needs add_days, days, or expires_at")
 	}
 	a.db.Exec("UPDATE peers SET expires_at=?,updated_at=? WHERE id=?", exp, nowUTC(), p.ID)
+	a.enforceNow() // apply the change to the live tunnel now, don't wait for the next tick
 	writeJSON(w, 200, peerJSON(a.mustPeer(r)))
 }
 
@@ -433,18 +453,21 @@ func (a *api) setQuota(w http.ResponseWriter, r *http.Request) {
 		die("quota_gb required")
 	}
 	a.db.Exec("UPDATE peers SET quota_bytes=?,updated_at=? WHERE id=?", gbToBytes(v), nowUTC(), p.ID)
+	a.enforceNow() // apply the change to the live tunnel now, don't wait for the next tick
 	writeJSON(w, 200, peerJSON(a.mustPeer(r)))
 }
 
 func (a *api) enableH(w http.ResponseWriter, r *http.Request) {
 	p := a.mustPeer(r)
 	a.db.Exec("UPDATE peers SET enabled=1,updated_at=? WHERE id=?", nowUTC(), p.ID)
+	a.enforceNow() // apply the change to the live tunnel now, don't wait for the next tick
 	writeJSON(w, 200, peerJSON(a.mustPeer(r)))
 }
 
 func (a *api) disableH(w http.ResponseWriter, r *http.Request) {
 	p := a.mustPeer(r)
 	a.db.Exec("UPDATE peers SET enabled=0,updated_at=? WHERE id=?", nowUTC(), p.ID)
+	a.enforceNow() // apply the change to the live tunnel now, don't wait for the next tick
 	writeJSON(w, 200, peerJSON(a.mustPeer(r)))
 }
 
