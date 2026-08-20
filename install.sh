@@ -291,6 +291,24 @@ case "$(uname -m)" in
   *) err "unsupported arch: $(uname -m)"; exit 1;;
 esac
 
+# On an existing install (update / re-run) skip the VPN + port questions — they
+# only apply to a fresh setup. WireGuard is never re-bootstrapped when a config
+# already exists (see below), so answering the port prompt would be a no-op.
+# Derive the current layout from disk and preserve it. Explicit env vars still win.
+if [ -f /etc/wgmgr/config.json ]; then
+  if [ -z "${INSTALL_WG+x}" ]; then
+    if [ -f "/etc/wireguard/${IFACE}.conf" ]; then INSTALL_WG=1; else INSTALL_WG=0; fi
+  fi
+  if [ -z "${INSTALL_OVPN+x}" ]; then
+    if [ -n "$(config_json_value ovpn_port)" ] || [ -n "$(config_json_value ovpn_endpoint)" ] || [ -n "$(config_json_value ovpn_subnet)" ]; then
+      INSTALL_OVPN=1
+    else
+      INSTALL_OVPN=0
+    fi
+  fi
+  say "existing install detected — updating the binary in place (VPN config preserved)"
+fi
+
 # --- interactive selection: ask which VPN(s) + which ports when run by hand on a terminal.
 # Skipped entirely for automation (no tty, or the choice pre-set via env vars), so piped/cron
 # installs stay non-interactive. Works through `curl | bash` because we read from /dev/tty.
@@ -384,7 +402,12 @@ RestartSec=5
 WantedBy=multi-user.target
 UNIT
 systemctl daemon-reload
-systemctl enable --now wgmgr.service
+systemctl enable wgmgr.service >/dev/null 2>&1 || true
+# Use restart (not just `enable --now`): on an UPDATE the service is already
+# running, and `enable --now` won't restart it — so the freshly-swapped binary
+# (with the new embedded panel + fixes) would never take effect until a reboot.
+# restart also starts it on a first install.
+systemctl restart wgmgr.service
 allow_panel_firewall
 
 bootstrap_openvpn
