@@ -10,10 +10,46 @@ import (
 	"time"
 )
 
-// defaultOvpnStatus is where the shipped systemd unit points OpenVPN's --status file
-// (`--status /run/openvpn/server.status 10`). Used when cfg.OvpnStatus is unset so existing
-// installs get the robust file-based reader without a config migration.
-const defaultOvpnStatus = "/run/openvpn/server.status"
+// ovpnStatusCandidates is the list of paths OpenVPN commonly writes its --status file to,
+// tried in order when cfg.OvpnStatus is unset. Different systemd units on different distros
+// pick different paths — hard-coding one caused v1.5.3 to silently miss OVPN usage on hosts
+// where openvpn-server@ was the running unit (Debian/Ubuntu default) instead of the older
+// wgmgr-shipped openvpn@ path. The auto-probe below picks the newest non-empty candidate,
+// so operators don't need per-host ovpn_status overrides.
+var ovpnStatusCandidates = []string{
+	"/run/openvpn-server/status-server.log", // openvpn-server@server.service (modern Debian/Ubuntu)
+	"/run/openvpn-server/server.status",     // same unit, alternate name some installers use
+	"/run/openvpn/server.status",            // wgmgr's shipped path (openvpn@server.service style)
+	"/var/log/openvpn/status.log",           // occasional older layout
+}
+
+// resolveOvpnStatus picks the --status file to read.
+//   - Explicit cfg.OvpnStatus wins even when stale/empty; an operator override should surface
+//     misconfiguration through the normal "NOT counted this tick" warning, not be silently
+//     replaced by auto-detection.
+//   - Otherwise, iterate ovpnStatusCandidates and pick the most recently modified one that
+//     exists AND is non-empty. A 0-byte candidate is almost always a leftover from a stopped
+//     unit (observed on live servers) — treating it as authoritative "no clients" is what
+//     silently zeroed accounting in v1.5.3.
+//   - Returns "" when nothing qualifies, letting ovpnUsage fall through to the mgmt socket
+//     and log a failure.
+func resolveOvpnStatus(cfg Config) string {
+	if cfg.OvpnStatus != "" {
+		return cfg.OvpnStatus
+	}
+	var best string
+	var bestMod time.Time
+	for _, p := range ovpnStatusCandidates {
+		fi, err := os.Stat(p)
+		if err != nil || fi.Size() == 0 {
+			continue
+		}
+		if fi.ModTime().After(bestMod) {
+			best, bestMod = p, fi.ModTime()
+		}
+	}
+	return best
+}
 
 // parseOvpnStatus parses OpenVPN status output and returns Common Name -> total bytes
 // transferred this session (received + sent). It accepts BOTH machine formats so the same
@@ -60,10 +96,11 @@ func addOvpnBytes(m map[string]int64, cn, rxStr, txStr string) {
 
 // ovpnUsage returns Common Name -> total session bytes for every OpenVPN client, for the
 // enforce loop to delta-accumulate. It prefers OpenVPN's --status FILE (cfg.OvpnStatus, or the
-// shipped default): the file has no single-client limit and is rewritten every few seconds, so
-// it can't be wedged the way the management socket can (the socket accepts one client at a time
-// and a single stuck session makes every later connect() return ECONNREFUSED — which silently
-// froze usage accounting in the field). The management socket is kept as a fallback.
+// newest non-empty candidate under /run/openvpn*): the file has no single-client limit and is
+// rewritten every few seconds, so it can't be wedged the way the management socket can (the
+// socket accepts one client at a time and a single stuck session makes every later connect()
+// return ECONNREFUSED — which silently froze usage accounting in the field). The management
+// socket is kept as a fallback for older installs.
 //
 // Returns an empty map when OVPN isn't configured. When OVPN IS configured but no source can be
 // read, it logs to stderr — a stalled reader must be visible, not look like "no traffic".
@@ -71,24 +108,25 @@ func ovpnUsage(cfg Config) map[string]int64 {
 	if cfg.OvpnMgmt == "" && cfg.OvpnStatus == "" {
 		return map[string]int64{} // OVPN usage tracking off — WG-only install, unchanged behavior
 	}
-	statusFile := cfg.OvpnStatus
-	if statusFile == "" {
-		statusFile = defaultOvpnStatus
-	}
 	// Primary: the status file. A readable file is authoritative even when it lists zero
 	// clients (nobody connected) — we do NOT fall through to the socket in that case.
-	if b, err := os.ReadFile(statusFile); err == nil {
-		return parseOvpnStatus(string(b))
+	// resolveOvpnStatus already skipped 0-byte / missing candidates, so an empty parse here
+	// really does mean "OpenVPN is up with nobody connected".
+	statusFile := resolveOvpnStatus(cfg)
+	if statusFile != "" {
+		if b, err := os.ReadFile(statusFile); err == nil {
+			return parseOvpnStatus(string(b))
+		}
 	}
-	// Fallback: the management socket (older installs without a readable status file).
+	// Fallback: the management socket (older installs / status file not yet written).
 	if cfg.OvpnMgmt != "" {
 		if m, err := ovpnUsageMgmt(cfg.OvpnMgmt); err == nil {
 			return m
 		} else {
-			fmt.Fprintf(os.Stderr, "ovpn: usage read failed (status file %q unreadable, mgmt %q: %v) — OpenVPN usage NOT counted this tick\n", statusFile, cfg.OvpnMgmt, err)
+			fmt.Fprintf(os.Stderr, "ovpn: usage read failed (no readable --status file found among %v, mgmt %q: %v) — OpenVPN usage NOT counted this tick\n", ovpnStatusCandidates, cfg.OvpnMgmt, err)
 		}
 	} else {
-		fmt.Fprintf(os.Stderr, "ovpn: status file %q unreadable and no mgmt socket configured — OpenVPN usage NOT counted this tick\n", statusFile)
+		fmt.Fprintf(os.Stderr, "ovpn: no readable --status file found among %v and no mgmt socket configured — OpenVPN usage NOT counted this tick\n", ovpnStatusCandidates)
 	}
 	return map[string]int64{}
 }

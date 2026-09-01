@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -54,6 +56,55 @@ func TestParseOvpnStatusV1File(t *testing.T) {
 	}
 	if len(m) != 2 {
 		t.Errorf("expected 2 CNs, got %d (%v)", len(m), m)
+	}
+}
+
+// resolveOvpnStatus is what stops v1.5.3's "silently zero on wrong path" mode: an operator
+// override must be honored verbatim; a stale 0-byte file (leftover from a stopped unit) must
+// NOT be picked as authoritative; among real candidates the newest one wins.
+func TestResolveOvpnStatus(t *testing.T) {
+	dir := t.TempDir()
+	orig := ovpnStatusCandidates
+	t.Cleanup(func() { ovpnStatusCandidates = orig })
+
+	stale := filepath.Join(dir, "stale.status") // leftover 0-byte file
+	old := filepath.Join(dir, "old.status")     // real, older
+	fresh := filepath.Join(dir, "fresh.status") // real, newest — should win
+	if err := os.WriteFile(stale, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(old, []byte("TITLE,OpenVPN\nEND\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fresh, []byte("TITLE,OpenVPN\nEND\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Force strict mtime ordering (t.TempDir + WriteFile on some filesystems has 1s resolution).
+	past := time.Now().Add(-2 * time.Hour)
+	older := time.Now().Add(-1 * time.Hour)
+	os.Chtimes(stale, past, past)
+	os.Chtimes(old, older, older)
+	os.Chtimes(fresh, time.Now(), time.Now())
+	ovpnStatusCandidates = []string{
+		stale, // 0-byte -> skipped even though "first"
+		filepath.Join(dir, "missing.status"),
+		old,
+		fresh,
+	}
+
+	// Explicit override wins even when it's a nonexistent path — the caller must see the
+	// misconfiguration through the "NOT counted" warning, not have it silently masked.
+	if got := resolveOvpnStatus(Config{OvpnStatus: "/does/not/exist"}); got != "/does/not/exist" {
+		t.Errorf("override ignored: got %q", got)
+	}
+	// Auto-probe: newest non-empty candidate wins; 0-byte and missing are skipped.
+	if got := resolveOvpnStatus(Config{}); got != fresh {
+		t.Errorf("auto-probe picked %q, want %q", got, fresh)
+	}
+	// All candidates missing -> "" so ovpnUsage falls through to the mgmt socket / warns.
+	ovpnStatusCandidates = []string{filepath.Join(dir, "none1"), filepath.Join(dir, "none2")}
+	if got := resolveOvpnStatus(Config{}); got != "" {
+		t.Errorf("with no candidates, expected empty string, got %q", got)
 	}
 }
 
