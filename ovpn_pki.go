@@ -353,10 +353,24 @@ func ovpnAttach(db *sql.DB, cfg Config, p Peer) string {
 	return ip
 }
 
+// ovpnRemoveCCD deletes /etc/openvpn/ccd/<username>. Called from ovpnDetach (removing just
+// the OVPN identity while keeping the wgmgr user) and from the whole-user delete paths
+// (cmdRemove / deletePeer). With ccd-exclusive on, OpenVPN refuses any client whose CN has
+// no matching CCD file, so removing the CCD is what actually stops the deleted client's
+// existing (10-year-valid) cert from reconnecting. Errors from os.Remove are ignored — a
+// missing CCD is the desired end state, and a permission error means the daemon can't
+// operate at all (would surface elsewhere).
+func ovpnRemoveCCD(cfg Config, username string) {
+	if cfg.OvpnDir == "" || username == "" {
+		return
+	}
+	os.Remove(filepath.Join(cfg.OvpnDir, "ccd", username))
+}
+
 // ovpnDetach removes a user's OpenVPN identity: drops the CCD file (ccd-exclusive then
 // blocks reconnects) and clears the OVPN fields + usage in the DB.
 func ovpnDetach(db *sql.DB, cfg Config, p Peer) {
-	os.Remove(filepath.Join(cfg.OvpnDir, "ccd", p.Username))
+	ovpnRemoveCCD(cfg, p.Username)
 	if _, err := db.Exec("UPDATE peers SET ovpn_cn='',ovpn_ip='',ovpn_enabled=0,ovpn_cert='',ovpn_key='',used_ovpn_bytes=0,last_ovpn_bytes=0,updated_at=? WHERE id=?",
 		nowUTC(), p.ID); err != nil {
 		die("ovpn detach: %v", err)

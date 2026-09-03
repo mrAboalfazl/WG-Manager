@@ -737,12 +737,16 @@ func cmdRemove(args []string) {
 	cfg := loadConfig()
 	db := openDB(cfg.DB)
 	defer db.Close()
-	res, err := db.Exec("DELETE FROM peers WHERE username=?", args[0])
-	if err != nil {
-		die("delete: %v", err)
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
+	p, ok := getPeer(db, args[0])
+	if !ok {
 		die("no such user %q", args[0])
+	}
+	// Delete the CCD file first — with ccd-exclusive on, this is what actually stops the
+	// (10-year) client cert from reconnecting once the DB row is gone. Without it we leave
+	// an orphan CCD that keeps the deleted user working, un-metered and unblockable.
+	ovpnRemoveCCD(cfg, p.Username)
+	if _, err := db.Exec("DELETE FROM peers WHERE id=?", p.ID); err != nil {
+		die("delete: %v", err)
 	}
 	renderConf(db, cfg, true)
 	fmt.Println("removed", args[0])
@@ -822,7 +826,7 @@ func setField(args []string, usage string, apply func(db *sql.DB, p Peer, cfg Co
 }
 
 func printUsage() {
-	fmt.Println("wgmgr <menu|status|restart|update|uninstall|export-users|import-users|export-bundle|import-bundle|init|import|add|rm|list|show|config|set-quota|renew|enable|disable|render|serve|set-login|set-base-path|ovpn-init|ovpn-add|ovpn-config|ovpn-rm> ...")
+	fmt.Println("wgmgr <menu|status|restart|update|uninstall|export-users|import-users|export-bundle|import-bundle|init|import|add|rm|list|show|config|set-quota|renew|enable|disable|render|serve|set-login|set-base-path|ovpn-init|ovpn-add|ovpn-config|ovpn-rm|ovpn-orphans> ...")
 	fmt.Println("uninstall flags: --yes --purge-data --purge-openvpn --purge-wireguard")
 	fmt.Println("Run `wgmgr` with no arguments on a terminal to open the management menu.")
 }
@@ -1393,6 +1397,8 @@ func main() {
 		cmdOvpnConfig(args)
 	case "ovpn-rm":
 		cmdOvpnRm(args)
+	case "ovpn-orphans":
+		cmdOvpnOrphans(args)
 	case "set-quota":
 		setField(args, "usage: wgmgr set-quota <username> <GB>", func(db *sql.DB, p Peer, cfg Config) {
 			if len(args) < 2 {

@@ -371,6 +371,9 @@ func (a *api) createPeer(w http.ResponseWriter, r *http.Request) {
 
 func (a *api) deletePeer(w http.ResponseWriter, r *http.Request) {
 	p := a.mustPeer(r)
+	// Delete the CCD file first (see cmdRemove) so the deleted client's 10-year cert can
+	// no longer reconnect via ccd-exclusive. Otherwise every panel Delete leaks an orphan.
+	ovpnRemoveCCD(a.cfg, p.Username)
 	a.db.Exec("DELETE FROM peers WHERE id=?", p.ID)
 	renderConf(a.db, a.cfg, true)
 	writeJSON(w, 200, map[string]any{"deleted": p.Username})
