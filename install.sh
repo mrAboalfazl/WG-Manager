@@ -357,7 +357,9 @@ if curl -fsSL "https://github.com/${REPO}/releases/latest/download/wgmgr-linux-$
 elif command -v go >/dev/null 2>&1; then
   say "no release asset reachable — building from source with Go…"
   tmp="$(mktemp -d)"; git clone --depth 1 "https://github.com/${REPO}.git" "$tmp" >/dev/null 2>&1
-  ( cd "$tmp" && CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o "${PREFIX}/wgmgr.new" . )
+  # source-build fallback: version stamp comes from the current tag if any, else "source-<short-sha>"
+  ver="$(cd "$tmp" && (git describe --tags --exact-match 2>/dev/null || echo "source-$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"))"
+  ( cd "$tmp" && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.Version=${ver}" -o "${PREFIX}/wgmgr.new" . )
   rm -rf "$tmp"
 else
   err "couldn't download a release binary and Go isn't installed to build from source."; exit 1

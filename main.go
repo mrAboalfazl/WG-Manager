@@ -26,6 +26,12 @@ import (
 const configPath = "/etc/wgmgr/config.json"
 const updateInstallerCommand = "curl -fsSL https://raw.githubusercontent.com/mrAboalfazl/WG-Manager/main/install.sh | bash"
 
+// Version is the release tag baked into the binary at build time via
+// `-ldflags "-X main.Version=vX.Y.Z"` (see .github/workflows/release.yml). Dev/source
+// builds leave it as "dev". The panel's Update card displays this and compares it
+// against GitHub's latest release to decide whether an update is available.
+var Version = "dev"
+
 // peerMarker delimits the wgmgr-managed [Peer] region in wg0.conf. Everything ABOVE
 // the first marker/peer (the [Interface] block + PostUp/PostDown) is preserved verbatim.
 const peerMarker = "# >>> wgmgr managed peers (do not edit below) >>>"

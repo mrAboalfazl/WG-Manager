@@ -87,6 +87,7 @@ func startAPI(cfg Config, db *sql.DB) {
 	mux.HandleFunc("GET /api-token", a.guard(a.getAPIToken))
 	mux.HandleFunc("POST /api-token/regenerate", a.guard(a.regenAPIToken))
 	mux.HandleFunc("POST /update", a.guard(a.updateServer))
+	mux.HandleFunc("GET /version", a.guard(a.versionH))
 	mux.HandleFunc("GET /migration/export", a.guard(a.exportMigration))
 	mux.HandleFunc("POST /migration/import", a.guard(a.importMigration))
 	mux.HandleFunc("GET /migration/bundle", a.guard(a.exportMigrationBundle))
