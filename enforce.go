@@ -87,7 +87,8 @@ func enforceTick(db *sql.DB, cfg Config) {
 	ov := ovpnUsage(cfg) // CN -> session bytes; empty map when OVPN is not configured
 	now := time.Now().UTC()
 	nowStr := now.Format(time.RFC3339)
-	for _, p := range allPeers(db) {
+	peers := allPeers(db)
+	for _, p := range peers {
 		// WireGuard usage (per pubkey; rx/tx counters reset when the interface restarts).
 		if cur, ok := tr[p.PublicKey]; ok && p.PublicKey != "" {
 			rx, tx := cur[0], cur[1]
@@ -134,6 +135,64 @@ func enforceTick(db *sql.DB, cfg Config) {
 			db.Exec("UPDATE peers SET blocked=? WHERE id=?", b2i(blocked), p.ID)
 		}
 	}
+	// Reconcile: `ipset del` fires only when a peer is iterated above, so any IP that
+	// was blocked at deletion time (or whose owning peer's tunnel IP has since changed)
+	// stays in the ipset forever. That's a *conservative* leak — more blocking than
+	// requested, never less — but when a tunnel IP is later reassigned to a new peer,
+	// the new peer would be silently DROPped until an operator noticed. Sweep any ipset
+	// members that no owning peer claims: safe because the sweep only removes IPs the
+	// enforce logic no longer considers, and any legitimate block gets re-added on the
+	// same or next tick by the loop above.
+	known := make(map[string]bool, 2*len(peers))
+	for _, p := range peers {
+		if p.Address != "" {
+			known[p.Address] = true
+		}
+		if p.OvpnIP != "" {
+			known[p.OvpnIP] = true
+		}
+	}
+	for _, ip := range staleIPs(ipsetMembers(cfg.IPSet), known) {
+		run("ipset", "del", cfg.IPSet, ip)
+	}
+}
+
+// ipsetMembers returns the IPs currently in an ipset. `ipset list -o save` emits one
+// `add <setname> <ip>[ <opts>]` line per member (plus a leading `create` line we ignore),
+// which is easier to parse than the default `Members:`-block format and stable across
+// ipset versions. Errors → nil (empty membership → reconcile becomes a no-op, which is
+// the safe default: we never wrongly delete a live block just because listing failed).
+func ipsetMembers(name string) []string {
+	out, err := run("ipset", "list", name, "-o", "save")
+	if err != nil {
+		return nil
+	}
+	return parseIpsetSave(name, out)
+}
+
+// parseIpsetSave extracts member IPs from `ipset list -o save` output. Split out from
+// ipsetMembers so the parser can be tested without shelling out to ipset.
+func parseIpsetSave(setName, out string) []string {
+	var ips []string
+	for _, line := range strings.Split(out, "\n") {
+		f := strings.Fields(line)
+		if len(f) >= 3 && f[0] == "add" && f[1] == setName {
+			ips = append(ips, f[2])
+		}
+	}
+	return ips
+}
+
+// staleIPs returns members of `have` that aren't in `want`. Extracted so the reconcile
+// logic can be tested without shelling out to ipset.
+func staleIPs(have []string, want map[string]bool) []string {
+	var out []string
+	for _, ip := range have {
+		if !want[ip] {
+			out = append(out, ip)
+		}
+	}
+	return out
 }
 
 // cmdServe runs the enforcement loop forever (systemd service). Phase 3 starts the API here too.
