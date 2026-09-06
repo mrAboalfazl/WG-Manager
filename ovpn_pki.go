@@ -413,7 +413,14 @@ func cmdOvpnInit(args []string) {
 		cfg.OvpnEndpoint = v
 	}
 	if cfg.OvpnEndpoint == "" {
-		cfg.OvpnEndpoint = parseParams(cfg.Params)["SERVER_PUB_IP"]
+		// serverPublicIP is safe when cfg.Params is empty (OpenVPN-only install) — the old
+		// code called parseParams("") here, which dies with "cannot read params : open :
+		// no such file or directory". The fallback chain (params → OvpnEndpoint → auto)
+		// gives us something usable on every host layout we support.
+		cfg.OvpnEndpoint = serverPublicIP(cfg)
+	}
+	if cfg.OvpnEndpoint == "" {
+		die("openvpn endpoint required — pass --endpoint <ip-or-hostname> (auto-detect returned nothing)")
 	}
 
 	// 0755: OpenVPN reads CCD files at connect time AFTER dropping to user 'nobody', so BOTH

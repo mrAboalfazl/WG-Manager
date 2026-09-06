@@ -1357,7 +1357,14 @@ func main() {
 		db := openDB(cfg.DB)
 		defer db.Close()
 		renderConf(db, cfg, false)
-		fmt.Println("rendered wg0.conf peer section from DB and applied (wg syncconf)")
+		// renderConf takes an early-return on OpenVPN-only installs (cfg.WGConf == "").
+		// Don't lie about what happened — the install log used to say "rendered wg0.conf..."
+		// on an OVPN-only box even though nothing had been rendered.
+		if cfg.WGConf == "" {
+			fmt.Println("OpenVPN-only install — no WireGuard config to render.")
+		} else {
+			fmt.Println("rendered wg0.conf peer section from DB and applied (wg syncconf)")
+		}
 	case "enforce":
 		cfg := loadConfig()
 		db := openDB(cfg.DB)

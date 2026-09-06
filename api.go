@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"io"
 	"math/big"
-	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -42,7 +41,6 @@ func ensureCert(cfg Config) {
 	if err != nil {
 		die("gen tls key: %v", err)
 	}
-	pm := parseParams(cfg.Params)
 	tmpl := &x509.Certificate{
 		SerialNumber:          big.NewInt(time.Now().Unix()),
 		Subject:               pkix.Name{CommonName: "wgmgr"},
@@ -52,7 +50,12 @@ func ensureCert(cfg Config) {
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,
 	}
-	if ip := net.ParseIP(pm["SERVER_PUB_IP"]); ip != nil {
+	// IP SAN is a nice-to-have (helps browsers avoid a name-mismatch warning) but must not be
+	// load-bearing. On OpenVPN-only installs cfg.Params is "", and the old code did an
+	// unconditional parseParams(cfg.Params) here — that dies with "cannot read params : open :
+	// no such file or directory", crash-looping the daemon and leaving :8443 unbound. Route
+	// through serverPublicIP so we get the best-known IP without ever poking a missing file.
+	if ip := serverPublicIPParsed(cfg); ip != nil {
 		tmpl.IPAddresses = append(tmpl.IPAddresses, ip)
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
@@ -312,7 +315,9 @@ func (a *api) listPeers(w http.ResponseWriter, r *http.Request) {
 	for _, p := range allPeers(a.db) {
 		out = append(out, liveJSON(p, hs, now))
 	}
-	writeJSON(w, 200, map[string]any{"peers": out, "server": parseParams(a.cfg.Params)["SERVER_PUB_IP"]})
+	// serverPublicIP handles OVPN-only (empty cfg.Params) — parseParams(a.cfg.Params) here
+	// used to die on every /peers call in that mode, breaking the panel entirely.
+	writeJSON(w, 200, map[string]any{"peers": out, "server": serverPublicIP(a.cfg)})
 }
 
 func (a *api) showPeer(w http.ResponseWriter, r *http.Request) {

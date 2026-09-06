@@ -258,13 +258,21 @@ bootstrap_openvpn(){
   if [ -n "$(config_json_value ovpn_port)" ] || [ -n "$(config_json_value ovpn_endpoint)" ] || [ -n "$(config_json_value ovpn_subnet)" ]; then
     already_configured=1
   fi
+  # Always resolve an endpoint before calling ovpn-init. On OpenVPN-only installs (no
+  # /etc/wireguard/params), pre-v1.7.3 wgmgr's endpoint-fallback code called parseParams("")
+  # and died — killing the whole install with "wgmgr ovpn-init failed; skipping". Passing
+  # --endpoint here means the CLI never has to guess, regardless of what wgmgr's fallback does.
+  if [ -z "${OVPN_ENDPOINT+x}" ]; then
+    OVPN_ENDPOINT="$(curl -fsS --max-time 5 https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')"
+  fi
   if [ "$already_configured" = "1" ] && [ "${OVPN_RECONFIGURE:-0}" != "1" ]; then
     say "preserving existing OpenVPN endpoint/port; set OVPN_RECONFIGURE=1 to change them"
-    "${PREFIX}/wgmgr" ovpn-init || { err "wgmgr ovpn-init failed; skipping"; return 0; }
+    "${PREFIX}/wgmgr" ovpn-init ${OVPN_ENDPOINT:+--endpoint "$OVPN_ENDPOINT"} \
+      || { err "wgmgr ovpn-init failed; aborting install"; exit 1; }
   else
     "${PREFIX}/wgmgr" ovpn-init ${OVPN_PORT:+--port "$OVPN_PORT"} ${OVPN_PROTO:+--proto "$OVPN_PROTO"} \
       ${OVPN_SUBNET:+--subnet "$OVPN_SUBNET"} ${OVPN_ENDPOINT:+--endpoint "$OVPN_ENDPOINT"} \
-      || { err "wgmgr ovpn-init failed; skipping"; return 0; }
+      || { err "wgmgr ovpn-init failed; aborting install"; exit 1; }
   fi
   install_openvpn_routing
   systemctl restart wgmgr-openvpn-routing.service >/dev/null 2>&1 || true
@@ -387,12 +395,20 @@ fi
 "${PREFIX}/wgmgr" render || true
 
 # --- systemd service ---
+# OVPN-only installs have no wg-quick@ unit; keeping the After/Wants there is dead cruft.
+# Build the [Unit] deps line to match what the box actually runs.
 say "installing systemd service…"
+if [ "${INSTALL_WG:-1}" = "0" ]; then
+  UNIT_DEPS="After=network-online.target
+Wants=network-online.target"
+else
+  UNIT_DEPS="After=wg-quick@${IFACE}.service network-online.target
+Wants=wg-quick@${IFACE}.service"
+fi
 cat > /etc/systemd/system/wgmgr.service <<UNIT
 [Unit]
 Description=wgmgr (WireGuard user/quota manager + enforcement)
-After=wg-quick@${IFACE}.service network-online.target
-Wants=wg-quick@${IFACE}.service
+${UNIT_DEPS}
 
 [Service]
 Type=simple
@@ -417,6 +433,23 @@ bootstrap_openvpn
 IP="$(curl -fsS --max-time 5 https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')"
 # secret web base path the panel/API are served under (empty when upgrading a pre-base-path install)
 BASE="$(sed -n 's/.*"base_path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' /etc/wgmgr/config.json 2>/dev/null)"
+
+# --- post-install verification ---
+# Never lie to the operator: check the daemon actually started and :8443 is bound before
+# printing "done ✅". Pre-v1.7.3, install.sh would happily print a working-looking panel URL
+# even when wgmgr had crashed on parseParams("") in an OVPN-only install (~1.7.2 and earlier).
+sleep 2
+if ! systemctl is-active --quiet wgmgr.service; then
+  err "wgmgr.service failed to start after install"
+  err "  inspect: systemctl status wgmgr --no-pager"
+  err "  logs:    journalctl -u wgmgr --no-pager -n 40"
+  exit 1
+fi
+if ! ss -tlnp 2>/dev/null | grep -q ':8443 '; then
+  err "wgmgr is running but nothing is listening on :8443"
+  err "  logs: journalctl -u wgmgr --no-pager -n 40"
+  exit 1
+fi
 say "done ✅"
 say "Panel:  https://${IP}:8443${BASE}/   (login = admin / the password printed above)"
 say "API:    base https://${IP}:8443${BASE}  ·  token in /etc/wgmgr/config.json  ·  docs: https://github.com/${REPO}/blob/main/docs/API.md"
