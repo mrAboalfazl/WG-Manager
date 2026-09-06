@@ -25,11 +25,17 @@ func (a *api) serveUI(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(html))
 }
 
-// qrPeer returns a PNG QR code of the peer's client config (token-guarded).
+// qrPeer returns a PNG QR code of the peer's WireGuard client config (token-guarded).
+// OpenVPN .ovpn files carry embedded CA/cert/key PEMs — typically 3-4KB, far past the
+// practical QR-code payload limit — so OVPN-only users get a friendly error instead of
+// an unscannable QR (or the old raw die on missing PrivateKey).
 func (a *api) qrPeer(w http.ResponseWriter, r *http.Request) {
 	p := a.mustPeer(r)
 	if p.PrivateKey == "" {
-		die("no stored private key for %q", p.Username)
+		if p.OvpnCert != "" {
+			die("QR is unavailable for OpenVPN-only users (the .ovpn is too large to encode) — use the Config button to download the .ovpn instead")
+		}
+		die("no stored config for %q — user has neither WireGuard nor OpenVPN credentials", p.Username)
 	}
 	png, err := qrcode.Encode(clientConfig(a.db, a.cfg, p), qrcode.Medium, 360)
 	if err != nil {

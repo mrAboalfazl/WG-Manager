@@ -471,7 +471,7 @@ function render(){
       <td data-label="Expires">${exp}</td>
       <td data-label="Status">${status}</td>
       <td class="c-acts"><div class="acts">
-        <button class="btn ghost sm" onclick="showQR('${enc(p.username)}')" title="Config & QR">Config</button>
+        <button class="btn ghost sm" onclick="showConfig('${enc(p.username)}',${!!p.address})" title="Config & QR">Config</button>
         <button class="btn ghost sm" onclick="openRecharge('${enc(p.username)}')" title="Data / quota">Data</button>
         <button class="btn ghost sm" onclick="openRenew('${enc(p.username)}')" title="Extend time">Renew</button>
         <button class="btn ghost sm" onclick="ovpnAction('${enc(p.username)}',${p.has_ovpn})" title="OpenVPN profile">${p.has_ovpn?'OVPN':'+OVPN'}</button>
@@ -498,7 +498,13 @@ async function addUser(){
   const username=$('#m-user').value.trim();if(!username){toast('Username required','err');return;}
   const quota_gb=+$('#m-quota').value||0, days=+$('#m-days').value||0;
   try{const p=await api('POST','/peers',{username,quota_gb,days});toast('User created','ok');
-    await refresh();qrModal(p.username,p.client_config);}
+    await refresh();
+    // OVPN-only install auto-creates OVPN peers server-side (address stays empty); the returned
+    // client_config is then an .ovpn, not WG. Show the right modal so the user gets a working
+    // download instead of a broken QR of an .ovpn (which is too big for a QR anyway).
+    if(!p.address && p.has_ovpn){ ovpnModal(p.username, p.client_config); }
+    else { qrModal(p.username, p.client_config); }
+  }
   catch(e){toast(e.message,'err');}
 }
 
@@ -739,6 +745,13 @@ async function del(u){
   catch(e){toast(e.message,'err');}
 }
 
+// showConfig picks the right modal for a user based on whether they have a WG address.
+// OVPN-only users (address=="") route to the ovpnModal — the backend already returns an
+// .ovpn body for them from GET /peers/{name}/config, but a QR of an .ovpn is unscannable.
+async function showConfig(u, hasWG){
+  if(!hasWG){ return ovpnAction(u, true); }
+  return showQR(u);
+}
 async function showQR(u){
   try{const cfg=await api('GET','/peers/'+encodeURIComponent(u)+'/config');qrModal(u,cfg);}
   catch(e){toast(e.message,'err');}

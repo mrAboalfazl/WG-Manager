@@ -342,8 +342,16 @@ func (a *api) createPeer(w http.ResponseWriter, r *http.Request) {
 	if v, ok := m["days"].(float64); ok && v > 0 {
 		expires = time.Now().UTC().AddDate(0, 0, int(v)).Format(time.RFC3339)
 	}
-	// OpenVPN-only user (no WireGuard identity): {"ovpn_only": true}
-	if oo, _ := m["ovpn_only"].(bool); oo {
+	// OpenVPN-only user (no WireGuard identity). Explicitly requested via {"ovpn_only": true},
+	// OR implicit because this install has no WireGuard at all (cfg.WGConf == ""). Without the
+	// implicit branch, the panel's Add form on an OVPN-only install fell through to the WG path
+	// below and died on nextFreeIP → interfaceHead("") → os.ReadFile("") — the toast that read
+	// "read : open : no such file or directory".
+	ovpnOnly, _ := m["ovpn_only"].(bool)
+	if !ovpnOnly && a.cfg.WGConf == "" {
+		ovpnOnly = true
+	}
+	if ovpnOnly {
 		cfg := loadConfig()
 		ovpnDefaults(&cfg)
 		if !fileExists(filepath.Join(cfg.OvpnDir, "ca.crt")) {
@@ -386,8 +394,18 @@ func (a *api) deletePeer(w http.ResponseWriter, r *http.Request) {
 
 func (a *api) getConfig(w http.ResponseWriter, r *http.Request) {
 	p := a.mustPeer(r)
+	// OpenVPN-only users have no WG PrivateKey but do have an OvpnCert; fall through to
+	// the .ovpn config in that case so the panel's Config button doesn't dead-end with
+	// "no stored private key" on OVPN-only installs.
 	if p.PrivateKey == "" {
-		die("no stored private key for %q", p.Username)
+		if p.OvpnCert != "" {
+			cfg := a.cfg
+			ovpnDefaults(&cfg)
+			w.Header().Set("Content-Type", "text/plain")
+			w.Write([]byte(ovpnConfigForPeer(cfg, p)))
+			return
+		}
+		die("no stored config for %q — user has neither WireGuard nor OpenVPN credentials", p.Username)
 	}
 	w.Header().Set("Content-Type", "text/plain")
 	w.Write([]byte(clientConfig(a.db, a.cfg, p)))
