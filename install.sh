@@ -276,15 +276,36 @@ bootstrap_openvpn(){
   fi
   install_openvpn_routing
   systemctl restart wgmgr-openvpn-routing.service >/dev/null 2>&1 || true
-  # Ubuntu's canonical unit is openvpn-server@server (reads /etc/openvpn/server/server.conf);
-  # fall back to the legacy openvpn@server (reads /etc/openvpn/server.conf). Verified on 22.04.
+
+  # /etc/openvpn/server/server.conf is what the modern openvpn-server@ unit reads, while
+  # /etc/openvpn/server.conf is what the legacy openvpn@ unit reads. Historically we did
+  # `cp -f server.conf server/server.conf` — but a copy silently diverges the moment
+  # anything (an operator, another tool) edits only one of them. Pre-v1.7.5 that caused a
+  # multi-hour outage where one instance ran on the panel-requested port 2503 and the
+  # other still on 1194, fighting each other. Use a symlink so both paths ALWAYS resolve
+  # to the same file. rm -f first so we survive an existing regular-file leftover.
   mkdir -p /etc/openvpn/server
-  cp -f /etc/openvpn/server.conf /etc/openvpn/server/server.conf
+  if [ ! -L /etc/openvpn/server/server.conf ] || [ "$(readlink /etc/openvpn/server/server.conf)" != "/etc/openvpn/server.conf" ]; then
+    rm -f /etc/openvpn/server/server.conf
+    ln -s /etc/openvpn/server.conf /etc/openvpn/server/server.conf
+  fi
+
+  # Pick ONE canonical unit and mask the other. Historically install.sh ran `enable --now`
+  # on the fallback without ever disabling the primary, so both units ended up enabled and
+  # fought over the listen port on every reboot / preset refresh. `mask` symlinks the unit
+  # to /dev/null which no preset, dependency, or manual restart can override — the only
+  # way to bring it back is `systemctl unmask`, which is what install.sh does for the
+  # winning side (in case a previous run masked it).
+  systemctl unmask openvpn-server@server openvpn@server >/dev/null 2>&1 || true
   if systemctl enable --now openvpn-server@server 2>/dev/null && systemctl is-active --quiet openvpn-server@server; then
-    say "OpenVPN service: openvpn-server@server"
+    systemctl disable --now openvpn@server >/dev/null 2>&1 || true
+    systemctl mask openvpn@server >/dev/null 2>&1 || true
+    say "OpenVPN service: openvpn-server@server (legacy openvpn@server masked)"
   else
     systemctl enable --now openvpn@server >/dev/null 2>&1 || true
-    say "OpenVPN service: openvpn@server (legacy)"
+    systemctl disable --now openvpn-server@server >/dev/null 2>&1 || true
+    systemctl mask openvpn-server@server >/dev/null 2>&1 || true
+    say "OpenVPN service: openvpn@server (legacy — openvpn-server@server masked)"
   fi
   systemctl restart wgmgr.service >/dev/null 2>&1 || true  # reload config so the enforce loop reads ovpn_mgmt
   local subnet; subnet="$(sed -n 's/.*"ovpn_subnet"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' /etc/wgmgr/config.json 2>/dev/null)"

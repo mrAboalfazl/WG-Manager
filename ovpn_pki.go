@@ -446,7 +446,35 @@ func cmdOvpnInit(args []string) {
 	saveConfig(cfg)
 	fmt.Printf("openvpn initialized: dir=%s subnet=%s %s/%s endpoint=%s mgmt=%s\n",
 		cfg.OvpnDir, cfg.OvpnSubnet, cfg.OvpnProto, cfg.OvpnPort, cfg.OvpnEndpoint, cfg.OvpnMgmt)
-	fmt.Printf("config written to %s/server.conf — start it with: systemctl enable --now openvpn@server\n", cfg.OvpnDir)
+	// After writing new config, restart the active openvpn unit so port/proto changes take
+	// effect immediately. Pre-v1.7.5 the operator was told to run `systemctl enable --now
+	// openvpn@server` themselves, which (a) is stale on modern Ubuntu (openvpn-server@server
+	// is the canonical unit) and (b) meant a port change via `wgmgr ovpn-init --port N`
+	// silently didn't take effect until an external restart — the exact confusion behind
+	// the "OpenVPN not listening on udp/2503" tunnel-port-check failure.
+	unit := activeOpenvpnUnit()
+	if unit != "" {
+		if _, err := run("systemctl", "restart", unit); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: systemctl restart %s failed: %v (config written; restart manually)\n", unit, err)
+		} else {
+			fmt.Printf("restarted %s to apply the new config.\n", unit)
+		}
+	} else {
+		fmt.Printf("config written to %s/server.conf — start it with: systemctl enable --now openvpn-server@server\n", cfg.OvpnDir)
+	}
+}
+
+// activeOpenvpnUnit returns the systemd unit name that's currently active (openvpn-server@server
+// preferred as the modern Ubuntu canonical, openvpn@server as the legacy fallback). Empty when
+// neither is set up yet — used by cmdOvpnInit to decide whether to auto-restart after a config
+// change. Uses `systemctl is-active` which prints "active" only when the unit is truly running.
+func activeOpenvpnUnit() string {
+	for _, u := range []string{"openvpn-server@server", "openvpn@server"} {
+		if out, _ := run("systemctl", "is-active", u); strings.TrimSpace(out) == "active" {
+			return u
+		}
+	}
+	return ""
 }
 
 // cmdOvpnAdd attaches an OpenVPN identity (client cert + static IP + CCD) to an EXISTING user,
