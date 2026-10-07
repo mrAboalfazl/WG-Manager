@@ -26,27 +26,25 @@ type migrationFile struct {
 }
 
 type migrationPeer struct {
-	Username          string `json:"username"`
-	PublicKey         string `json:"public_key"`
-	PrivateKey        string `json:"private_key"`
-	PresharedKey      string `json:"preshared_key"`
-	Address           string `json:"address"`
-	QuotaBytes        int64  `json:"quota_bytes"`
-	UsedBytes         int64  `json:"used_bytes"`
-	LastRx            int64  `json:"last_rx"`
-	LastTx            int64  `json:"last_tx"`
-	LifetimeWGBytes   *int64 `json:"lifetime_wg_bytes,omitempty"`
-	LifetimeOvpnBytes *int64 `json:"lifetime_ovpn_bytes,omitempty"`
-	ExpiresAt         string `json:"expires_at"`
-	Enabled           bool   `json:"enabled"`
-	Blocked           bool   `json:"blocked"`
-	OvpnCN            string `json:"ovpn_cn"`
-	OvpnIP            string `json:"ovpn_ip"`
-	OvpnEnabled       bool   `json:"ovpn_enabled"`
-	UsedOvpnBytes     int64  `json:"used_ovpn_bytes"`
-	LastOvpnBytes     int64  `json:"last_ovpn_bytes"`
-	OvpnCert          string `json:"ovpn_cert"`
-	OvpnKey           string `json:"ovpn_key"`
+	Username      string `json:"username"`
+	PublicKey     string `json:"public_key"`
+	PrivateKey    string `json:"private_key"`
+	PresharedKey  string `json:"preshared_key"`
+	Address       string `json:"address"`
+	QuotaBytes    int64  `json:"quota_bytes"`
+	UsedBytes     int64  `json:"used_bytes"`
+	LastRx        int64  `json:"last_rx"`
+	LastTx        int64  `json:"last_tx"`
+	ExpiresAt     string `json:"expires_at"`
+	Enabled       bool   `json:"enabled"`
+	Blocked       bool   `json:"blocked"`
+	OvpnCN        string `json:"ovpn_cn"`
+	OvpnIP        string `json:"ovpn_ip"`
+	OvpnEnabled   bool   `json:"ovpn_enabled"`
+	UsedOvpnBytes int64  `json:"used_ovpn_bytes"`
+	LastOvpnBytes int64  `json:"last_ovpn_bytes"`
+	OvpnCert      string `json:"ovpn_cert"`
+	OvpnKey       string `json:"ovpn_key"`
 }
 
 type migrationBundleManifest struct {
@@ -98,39 +96,28 @@ func migrationFromDB(db *sql.DB) migrationFile {
 	}
 	for _, p := range allPeers(db) {
 		m.Peers = append(m.Peers, migrationPeer{
-			Username:          p.Username,
-			PublicKey:         p.PublicKey,
-			PrivateKey:        p.PrivateKey,
-			PresharedKey:      p.PSK,
-			Address:           p.Address,
-			QuotaBytes:        p.QuotaBytes,
-			UsedBytes:         p.UsedBytes,
-			LastRx:            p.LastRx,
-			LastTx:            p.LastTx,
-			LifetimeWGBytes:   int64Ptr(p.LifetimeWGBytes),
-			LifetimeOvpnBytes: int64Ptr(p.LifetimeOvpnBytes),
-			ExpiresAt:         p.ExpiresAt,
-			Enabled:           p.Enabled,
-			Blocked:           p.Blocked,
-			OvpnCN:            p.OvpnCN,
-			OvpnIP:            p.OvpnIP,
-			OvpnEnabled:       p.OvpnEnabled,
-			UsedOvpnBytes:     p.UsedOvpnBytes,
-			LastOvpnBytes:     p.LastOvpnBytes,
-			OvpnCert:          p.OvpnCert,
-			OvpnKey:           p.OvpnKey,
+			Username:      p.Username,
+			PublicKey:     p.PublicKey,
+			PrivateKey:    p.PrivateKey,
+			PresharedKey:  p.PSK,
+			Address:       p.Address,
+			QuotaBytes:    p.QuotaBytes,
+			UsedBytes:     p.UsedBytes,
+			LastRx:        p.LastRx,
+			LastTx:        p.LastTx,
+			ExpiresAt:     p.ExpiresAt,
+			Enabled:       p.Enabled,
+			Blocked:       p.Blocked,
+			OvpnCN:        p.OvpnCN,
+			OvpnIP:        p.OvpnIP,
+			OvpnEnabled:   p.OvpnEnabled,
+			UsedOvpnBytes: p.UsedOvpnBytes,
+			LastOvpnBytes: p.LastOvpnBytes,
+			OvpnCert:      p.OvpnCert,
+			OvpnKey:       p.OvpnKey,
 		})
 	}
 	return m
-}
-
-func int64Ptr(v int64) *int64 { return &v }
-
-func int64Value(v *int64) int64 {
-	if v == nil {
-		return 0
-	}
-	return *v
 }
 
 func parseParamsData(data []byte) map[string]string {
@@ -334,13 +321,11 @@ func importMigration(db *sql.DB, cfg Config, data []byte, apply bool) (created, 
 			if _, err := tx.Exec(`UPDATE peers SET
 				public_key=?,private_key=?,preshared_key=?,address=?,
 				quota_bytes=?,used_bytes=?,last_rx=?,last_tx=?,expires_at=?,enabled=?,blocked=?,
-				ovpn_cn=?,ovpn_ip=?,ovpn_enabled=?,used_ovpn_bytes=?,last_ovpn_bytes=?,ovpn_cert=?,ovpn_key=?,
-				lifetime_wg_bytes=COALESCE(?,lifetime_wg_bytes),lifetime_ovpn_bytes=COALESCE(?,lifetime_ovpn_bytes),updated_at=?
+				ovpn_cn=?,ovpn_ip=?,ovpn_enabled=?,used_ovpn_bytes=?,last_ovpn_bytes=?,ovpn_cert=?,ovpn_key=?,updated_at=?
 				WHERE id=?`,
 				p.PublicKey, p.PrivateKey, p.PresharedKey, p.Address,
 				p.QuotaBytes, p.UsedBytes, p.LastRx, p.LastTx, p.ExpiresAt, b2i(p.Enabled), b2i(p.Blocked),
-				p.OvpnCN, p.OvpnIP, b2i(p.OvpnEnabled), p.UsedOvpnBytes, p.LastOvpnBytes, p.OvpnCert, p.OvpnKey,
-				p.LifetimeWGBytes, p.LifetimeOvpnBytes, nowUTC(),
+				p.OvpnCN, p.OvpnIP, b2i(p.OvpnEnabled), p.UsedOvpnBytes, p.LastOvpnBytes, p.OvpnCert, p.OvpnKey, nowUTC(),
 				existing.ID); err != nil {
 				die("update %s: %v", p.Username, err)
 			}
@@ -350,13 +335,11 @@ func importMigration(db *sql.DB, cfg Config, data []byte, apply bool) (created, 
 		if _, err := tx.Exec(`INSERT INTO peers(
 			username,public_key,private_key,preshared_key,address,
 			quota_bytes,used_bytes,last_rx,last_tx,expires_at,enabled,blocked,
-			ovpn_cn,ovpn_ip,ovpn_enabled,used_ovpn_bytes,last_ovpn_bytes,ovpn_cert,ovpn_key,
-			lifetime_wg_bytes,lifetime_ovpn_bytes,created_at,updated_at)
-			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			ovpn_cn,ovpn_ip,ovpn_enabled,used_ovpn_bytes,last_ovpn_bytes,ovpn_cert,ovpn_key,created_at,updated_at)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			p.Username, p.PublicKey, p.PrivateKey, p.PresharedKey, p.Address,
 			p.QuotaBytes, p.UsedBytes, p.LastRx, p.LastTx, p.ExpiresAt, b2i(p.Enabled), b2i(p.Blocked),
-			p.OvpnCN, p.OvpnIP, b2i(p.OvpnEnabled), p.UsedOvpnBytes, p.LastOvpnBytes, p.OvpnCert, p.OvpnKey,
-			int64Value(p.LifetimeWGBytes), int64Value(p.LifetimeOvpnBytes), nowUTC(), nowUTC()); err != nil {
+			p.OvpnCN, p.OvpnIP, b2i(p.OvpnEnabled), p.UsedOvpnBytes, p.LastOvpnBytes, p.OvpnCert, p.OvpnKey, nowUTC(), nowUTC()); err != nil {
 			die("insert %s: %v", p.Username, err)
 		}
 		created++

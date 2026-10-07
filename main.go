@@ -80,15 +80,13 @@ type Peer struct {
 	Enabled    bool
 	Blocked    bool
 	// OpenVPN identity + usage — a user's quota is the COMBINED WG+OVPN total.
-	OvpnCN            string // OpenVPN common name (= username); "" if the user has no OVPN identity
-	OvpnIP            string // OpenVPN tunnel IP (static, via CCD) — blocked in the same ipset as the WG IP
-	OvpnEnabled       bool
-	UsedOvpnBytes     int64
-	LastOvpnBytes     int64  // last cumulative OVPN session bytes, for delta carry-over
-	OvpnCert          string // client cert PEM (stored so the .ovpn can be re-emitted)
-	OvpnKey           string // client key PEM
-	LifetimeWGBytes   int64  // usage archived by resets, WireGuard side
-	LifetimeOvpnBytes int64  // usage archived by resets, OpenVPN side
+	OvpnCN        string // OpenVPN common name (= username); "" if the user has no OVPN identity
+	OvpnIP        string // OpenVPN tunnel IP (static, via CCD) — blocked in the same ipset as the WG IP
+	OvpnEnabled   bool
+	UsedOvpnBytes int64
+	LastOvpnBytes int64  // last cumulative OVPN session bytes, for delta carry-over
+	OvpnCert      string // client cert PEM (stored so the .ovpn can be re-emitted)
+	OvpnKey       string // client key PEM
 }
 
 type dieError struct{ msg string }
@@ -194,17 +192,7 @@ func openDB(path string) *sql.DB {
 		updated_at TEXT NOT NULL,
 		notes TEXT DEFAULT ''
 	);
-	CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
-	CREATE TABLE IF NOT EXISTS traffic_history(
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		peer_id INTEGER NOT NULL,
-		username TEXT NOT NULL,
-		reset_at TEXT NOT NULL,
-		wg_bytes INTEGER NOT NULL DEFAULT 0,
-		ovpn_bytes INTEGER NOT NULL DEFAULT 0,
-		total_bytes INTEGER NOT NULL DEFAULT 0
-	);
-	CREATE INDEX IF NOT EXISTS idx_traffic_history_peer ON traffic_history(peer_id, id DESC);`
+	CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);`
 	if _, err := db.Exec(schema); err != nil {
 		die("migrate: %v", err)
 	}
@@ -218,8 +206,6 @@ func openDB(path string) *sql.DB {
 		"last_ovpn_bytes INTEGER NOT NULL DEFAULT 0",
 		"ovpn_cert TEXT DEFAULT ''",
 		"ovpn_key TEXT DEFAULT ''",
-		"lifetime_wg_bytes INTEGER NOT NULL DEFAULT 0",
-		"lifetime_ovpn_bytes INTEGER NOT NULL DEFAULT 0",
 	} {
 		db.Exec("ALTER TABLE peers ADD COLUMN " + col)
 	}
@@ -243,8 +229,7 @@ func openDB(path string) *sql.DB {
 func migratePeersRelaxWG(db *sql.DB) {
 	cols := "id,username,public_key,private_key,preshared_key,address,quota_bytes,used_bytes," +
 		"last_rx,last_tx,expires_at,enabled,blocked,created_at,updated_at,notes," +
-		"ovpn_cn,ovpn_ip,ovpn_enabled,used_ovpn_bytes,last_ovpn_bytes,ovpn_cert,ovpn_key," +
-		"lifetime_wg_bytes,lifetime_ovpn_bytes"
+		"ovpn_cn,ovpn_ip,ovpn_enabled,used_ovpn_bytes,last_ovpn_bytes,ovpn_cert,ovpn_key"
 	tx, err := db.Begin()
 	if err != nil {
 		die("phase5 migrate: begin: %v", err)
@@ -273,9 +258,7 @@ func migratePeersRelaxWG(db *sql.DB) {
 			used_ovpn_bytes INTEGER NOT NULL DEFAULT 0,
 			last_ovpn_bytes INTEGER NOT NULL DEFAULT 0,
 			ovpn_cert TEXT DEFAULT '',
-			ovpn_key TEXT DEFAULT '',
-			lifetime_wg_bytes INTEGER NOT NULL DEFAULT 0,
-			lifetime_ovpn_bytes INTEGER NOT NULL DEFAULT 0
+			ovpn_key TEXT DEFAULT ''
 		)`,
 		"INSERT INTO peers_new(" + cols + ") SELECT " + cols + " FROM peers",
 		"DROP TABLE peers",
@@ -296,15 +279,14 @@ func scanPeer(rows interface{ Scan(...interface{}) error }) (Peer, error) {
 	var enabled, blocked, ovpnEnabled int
 	err := rows.Scan(&p.ID, &p.Username, &p.PublicKey, &p.PrivateKey, &p.PSK, &p.Address,
 		&p.QuotaBytes, &p.UsedBytes, &p.LastRx, &p.LastTx, &p.ExpiresAt, &enabled, &blocked,
-		&p.OvpnCN, &p.OvpnIP, &ovpnEnabled, &p.UsedOvpnBytes, &p.LastOvpnBytes, &p.OvpnCert, &p.OvpnKey,
-		&p.LifetimeWGBytes, &p.LifetimeOvpnBytes)
+		&p.OvpnCN, &p.OvpnIP, &ovpnEnabled, &p.UsedOvpnBytes, &p.LastOvpnBytes, &p.OvpnCert, &p.OvpnKey)
 	p.Enabled = enabled != 0
 	p.Blocked = blocked != 0
 	p.OvpnEnabled = ovpnEnabled != 0
 	return p, err
 }
 
-const peerCols = "id,username,public_key,private_key,preshared_key,address,quota_bytes,used_bytes,last_rx,last_tx,expires_at,enabled,blocked,ovpn_cn,ovpn_ip,ovpn_enabled,used_ovpn_bytes,last_ovpn_bytes,ovpn_cert,ovpn_key,lifetime_wg_bytes,lifetime_ovpn_bytes"
+const peerCols = "id,username,public_key,private_key,preshared_key,address,quota_bytes,used_bytes,last_rx,last_tx,expires_at,enabled,blocked,ovpn_cn,ovpn_ip,ovpn_enabled,used_ovpn_bytes,last_ovpn_bytes,ovpn_cert,ovpn_key"
 
 func allPeers(db *sql.DB) []Peer {
 	rows, err := db.Query("SELECT " + peerCols + " FROM peers ORDER BY id")
@@ -1440,9 +1422,7 @@ func main() {
 		setField(args, "usage: wgmgr recharge <username> [--reset] [--add-gb N] [--set-gb N]", func(db *sql.DB, p Peer, cfg Config) {
 			_, flags := parseFlags(args[1:])
 			if flags["reset"] == "true" {
-				if err := resetPeerUsage(db, cfg, p); err != nil {
-					die("reset usage: %v", err)
-				}
+				db.Exec("UPDATE peers SET used_bytes=0,last_rx=0,last_tx=0,updated_at=? WHERE id=?", nowUTC(), p.ID)
 			}
 			if v := flags["set-gb"]; v != "" {
 				f, _ := strconv.ParseFloat(v, 64)

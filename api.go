@@ -100,7 +100,6 @@ func startAPI(cfg Config, db *sql.DB) {
 	mux.HandleFunc("GET /peers", a.guard(a.listPeers))
 	mux.HandleFunc("POST /peers", a.guard(a.createPeer))
 	mux.HandleFunc("GET /peers/{name}", a.guard(a.showPeer))
-	mux.HandleFunc("GET /peers/{name}/traffic-history", a.guard(a.trafficHistory))
 	mux.HandleFunc("DELETE /peers/{name}", a.guard(a.deletePeer))
 	mux.HandleFunc("GET /peers/{name}/config", a.guard(a.getConfig))
 	mux.HandleFunc("POST /peers/{name}/recharge", a.guard(a.recharge))
@@ -257,29 +256,23 @@ func gbToBytes(v float64) int64 { return int64(v * 1024 * 1024 * 1024) }
 
 func peerJSON(p Peer) map[string]any {
 	return map[string]any{
-		"username":            p.Username,
-		"address":             p.Address,
-		"public_key":          p.PublicKey,
-		"used_bytes":          p.UsedBytes, // WireGuard
-		"used_gb":             bytesToGB(p.UsedBytes),
-		"used_ovpn_bytes":     p.UsedOvpnBytes,
-		"used_ovpn_gb":        bytesToGB(p.UsedOvpnBytes),
-		"used_total_bytes":    p.UsedBytes + p.UsedOvpnBytes, // WG + OVPN = what the quota measures
-		"used_total_gb":       bytesToGB(p.UsedBytes + p.UsedOvpnBytes),
-		"lifetime_wg_bytes":   p.LifetimeWGBytes,
-		"lifetime_wg_gb":      bytesToGB(p.LifetimeWGBytes),
-		"lifetime_ovpn_bytes": p.LifetimeOvpnBytes,
-		"lifetime_ovpn_gb":    bytesToGB(p.LifetimeOvpnBytes),
-		"total_used_bytes":    p.LifetimeWGBytes + p.LifetimeOvpnBytes + p.UsedBytes + p.UsedOvpnBytes,
-		"total_used_gb":       bytesToGB(p.LifetimeWGBytes + p.LifetimeOvpnBytes + p.UsedBytes + p.UsedOvpnBytes),
-		"quota_bytes":         p.QuotaBytes,
-		"quota_gb":            bytesToGB(p.QuotaBytes),
-		"expires_at":          p.ExpiresAt,
-		"enabled":             p.Enabled,
-		"blocked":             p.Blocked,
-		"has_ovpn":            p.OvpnCN != "",
-		"ovpn_enabled":        p.OvpnEnabled,
-		"ovpn_ip":             p.OvpnIP,
+		"username":         p.Username,
+		"address":          p.Address,
+		"public_key":       p.PublicKey,
+		"used_bytes":       p.UsedBytes, // WireGuard
+		"used_gb":          bytesToGB(p.UsedBytes),
+		"used_ovpn_bytes":  p.UsedOvpnBytes,
+		"used_ovpn_gb":     bytesToGB(p.UsedOvpnBytes),
+		"used_total_bytes": p.UsedBytes + p.UsedOvpnBytes, // WG + OVPN = what the quota measures
+		"used_total_gb":    bytesToGB(p.UsedBytes + p.UsedOvpnBytes),
+		"quota_bytes":      p.QuotaBytes,
+		"quota_gb":         bytesToGB(p.QuotaBytes),
+		"expires_at":       p.ExpiresAt,
+		"enabled":          p.Enabled,
+		"blocked":          p.Blocked,
+		"has_ovpn":         p.OvpnCN != "",
+		"ovpn_enabled":     p.OvpnEnabled,
+		"ovpn_ip":          p.OvpnIP,
 	}
 }
 
@@ -436,20 +429,19 @@ func (a *api) syncH(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *api) recharge(w http.ResponseWriter, r *http.Request) {
-	p := a.mustPeer(r)
-	m := readJSON(r)
-	if reset, _ := m["reset"].(bool); reset {
-		if err := resetPeerUsage(a.db, a.cfg, p); err != nil {
-			die("reset usage: %v", err)
-		}
+	a.rechargeWith(w, r, readResetCounters, a.enforceNow)
+}
+
+// Keep the HTTP path testable with synthetic counters and no Linux side effects.
+func (a *api) rechargeWith(w http.ResponseWriter, r *http.Request, snapshot resetCounterReader, reconcile func()) {
+	var m map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&m); err != nil {
+		die("invalid recharge JSON: %v", err)
 	}
-	if v, ok := m["set_gb"].(float64); ok {
-		a.db.Exec("UPDATE peers SET quota_bytes=?,updated_at=? WHERE id=?", gbToBytes(v), nowUTC(), p.ID)
+	if err := rechargePeer(a.db, a.cfg, r.PathValue("name"), m, snapshot); err != nil {
+		die("recharge: %v", err)
 	}
-	if v, ok := m["add_gb"].(float64); ok {
-		a.db.Exec("UPDATE peers SET quota_bytes=quota_bytes+?,updated_at=? WHERE id=?", gbToBytes(v), nowUTC(), p.ID)
-	}
-	a.enforceNow() // apply the change to the live tunnel now, don't wait for the next tick
+	reconcile()
 	writeJSON(w, 200, peerJSON(a.mustPeer(r)))
 }
 
