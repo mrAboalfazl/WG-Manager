@@ -117,6 +117,7 @@
     transition:width .5s ease}
   .bar i.hi{background:linear-gradient(90deg,var(--warn),var(--bad))}
   .use{font-size:13px}.use b{font-weight:700;font-family:var(--mono)}
+  .hist{font-size:12px;margin-top:12px}.hist th,.hist td{padding:9px 6px;white-space:nowrap}
   .acts{display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap}
   .empty{padding:56px 24px;text-align:center;color:var(--mut)}
 
@@ -473,6 +474,7 @@ function render(){
       <td class="c-acts"><div class="acts">
         <button class="btn ghost sm" onclick="showConfig('${enc(p.username)}',${!!p.address})" title="Config & QR">Config</button>
         <button class="btn ghost sm" onclick="openRecharge('${enc(p.username)}')" title="Data / quota">Data</button>
+        <button class="btn ghost sm" onclick="openHistory('${enc(p.username)}')" title="Traffic history">History</button>
         <button class="btn ghost sm" onclick="openRenew('${enc(p.username)}')" title="Extend time">Renew</button>
         <button class="btn ghost sm" onclick="ovpnAction('${enc(p.username)}',${p.has_ovpn})" title="OpenVPN profile">${p.has_ovpn?'OVPN':'+OVPN'}</button>
         <button class="btn ghost sm" onclick="toggle('${enc(p.username)}',${p.enabled})">${p.enabled?'Disable':'Enable'}</button>
@@ -524,6 +526,23 @@ async function doRecharge(u){
   else if(segMode==='set')body.set_gb=+$('#m-gb').value||0;else body.add_gb=+$('#m-gb').value||0;
   try{await api('POST',`/peers/${encodeURIComponent(u)}/recharge`,body);toast('Recharged','ok');closeModal();refresh();}
   catch(e){toast(e.message,'err');}
+}
+
+async function openHistory(u){
+  try{
+    const d=await api('GET',`/peers/${encodeURIComponent(u)}/traffic-history`);
+    const current=d.current||{}, total=d.total||{};
+    const rows=(d.resets||[]).map(x=>`<tr><td>${esc(x.reset_at||'')}</td>
+      <td>${fmtGB(x.wg_gb)}</td><td>${fmtGB(x.ovpn_gb)}</td>
+      <td><b>${fmtGB(x.total_gb)}</b></td><td>${fmtGB(x.cumulative_total_gb)}</td></tr>`).join('');
+    modal(`<h3>Traffic history · ${esc(u)}</h3>
+      <p class="sub">Usage is archived here whenever you reset the user. Tracking starts with the first reset after this update.</p>
+      <div class="use">Current period: <b>${fmtGB(current.total_gb)}</b>
+        <span class="ip">WG ${fmtGB(current.wg_gb)} · OVPN ${fmtGB(current.ovpn_gb)}</span></div>
+      <div class="use" style="margin-top:8px">Total since tracking started: <b>${fmtGB(total.total_gb)}</b></div>
+      ${rows?`<div style="overflow:auto"><table class="hist"><thead><tr><th>Reset</th><th>WG</th><th>OVPN</th><th>Period</th><th>Cumulative</th></tr></thead><tbody>${rows}</tbody></table></div>`:'<div class="empty" style="padding:26px 0">No resets recorded yet.</div>'}
+      <div class="row"><button class="btn" onclick="closeModal()">Done</button></div>`);
+  }catch(e){toast(e.message,'err');}
 }
 
 function openRenew(u){
