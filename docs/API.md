@@ -84,6 +84,7 @@ POST   /login          (public)  {username,password} -> { token }   # token == t
 POST   /change-password          {current_password,new_password} -> { ok:true }
 GET    /api-token                -> { token }              # view the API token
 POST   /api-token/regenerate     -> { token }              # rotate (old token dies immediately)
+GET    /version                  -> { installed, latest, update_available, ... }
 POST   /update                   -> 202 { ok:true }        # run latest installer/update in background
 
 # Migration
@@ -131,6 +132,80 @@ server hasn't been `ovpn-init`'d.
   Iran-node tunnel fronts the VPN during normal operation, translate endpoints in the consuming
   website/service; tunnel creation should not mutate WG-Manager's stored server endpoint/ports. JSON
   exports and bundles contain private keys; store them securely.
+
+---
+
+## Updating the panel from your backend
+
+Your website's backend can update a server without opening its panel. Use that server's
+base path and full-admin API token for both `POST /update` and `GET /version`. Keep the token
+in your backend configuration, never in browser JavaScript.
+
+**1. Check the installed version (when supported by the current installation).**
+
+```bash
+B='https://<SERVER>:8443/<base_path>'
+H="Authorization: Bearer ${WGMGR_TOKEN}"
+CERT='/path/to/trusted-panel-cert.pem'
+
+curl --fail-with-body --silent --show-error --cacert "$CERT" \
+     -H "$H" "$B/version"
+```
+
+`WGMGR_TOKEN` is your server's API token, supplied through your backend environment. Use the
+trusted panel certificate for self-signed TLS; see **Connection** above. A typical response
+before an upgrade is shown below (additional release metadata fields are omitted):
+
+```json
+{
+  "installed": "v1.7.5",
+  "latest": "v1.7.6",
+  "update_available": true
+}
+```
+
+`latest` is cached for up to five minutes. If GitHub cannot be reached, the response still
+includes `installed`, but returns `latest: null`, `update_available: false`, and `check_error`.
+That response does not prove the server is up to date.
+
+**2. Start the update once. No request body is required.**
+
+```bash
+curl --fail-with-body --silent --show-error --cacert "$CERT" \
+     -H "$H" -X POST "$B/update"
+```
+
+The response is **HTTP 202 Accepted**:
+
+```json
+{
+  "ok": true,
+  "message": "update started; service may restart shortly"
+}
+```
+
+This confirms the background update was started, **not that installation succeeded**. The
+server runs its installer, which downloads the latest GitHub release for its architecture.
+The request does not select a particular version. The API may temporarily become unavailable,
+and the installer can restart VPN services and interrupt connections. Existing-install updates
+are intended to preserve users, credentials, quotas, expiry, and configuration.
+
+**3. Verify completion using the installed version.**
+
+Poll authenticated `GET /version`, for example every five seconds with a bounded timeout,
+and confirm `installed` equals the release you intended to install. For the traffic-reset
+fix, that release is `v1.7.6`. Validate that the response is JSON with an `installed` field;
+an HTML page or a successful `/healthz` response alone does not verify the upgrade.
+
+Allow transient connection errors while the service restarts. Do not repeatedly send
+`POST /update`: concurrent update jobs can overlap. If verification times out or the version
+remains unchanged, inspect `/tmp/wgmgr-update.log` on the server via SSH before retrying.
+There is no API update-job status or log endpoint. Invalid credentials return HTTP 401;
+a failure to start the update process returns HTTP 400 with an `error` message.
+
+Older installations can update remotely if they already implement `POST /update`. Some may
+lack `GET /version` before upgrading; it becomes available after installing a release that
+supports it. If `POST /update` itself is missing, update that server through SSH first.
 
 ---
 
