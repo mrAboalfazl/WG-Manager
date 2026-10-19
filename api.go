@@ -362,7 +362,7 @@ func (a *api) createPeer(w http.ResponseWriter, r *http.Request) {
 			die("insert: %v", err)
 		}
 		p, _ := getPeer(a.db, username)
-		ovpnAttach(a.db, cfg, p)
+		ovpnAttachNewUser(a.db, cfg, p)
 		p, _ = getPeer(a.db, username)
 		resp := peerJSON(p)
 		resp["client_config"] = ovpnConfigForPeer(cfg, p)

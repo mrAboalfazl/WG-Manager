@@ -201,19 +201,10 @@ func ovpnNextFreeIP(db *sql.DB, subnet string) string {
 			used[p.OvpnIP] = true
 		}
 	}
-	ip := ipnet.IP.Mask(ipnet.Mask)
-	for i := 0; i < 65534; i++ {
-		ip = nextIP(ip)
-		if !ipnet.Contains(ip) {
-			break
-		}
-		s := ip.String()
-		if strings.HasSuffix(s, ".0") || used[s] {
-			continue
-		}
-		return s
+	if ip, ok := nextFreeHost(ipnet, used); ok {
+		return ip
 	}
-	die("ovpn: no free IP in %s", subnet)
+	die("ovpn: no free IP in %s — widen the pool with `wgmgr expand-subnet` (existing profiles keep working)", subnet)
 	return ""
 }
 
@@ -308,7 +299,7 @@ func ovpnDefaults(cfg *Config) {
 		cfg.OvpnDir = "/etc/openvpn"
 	}
 	if cfg.OvpnSubnet == "" {
-		cfg.OvpnSubnet = "10.8.0.0/24"
+		cfg.OvpnSubnet = "10.8.0.0/16"
 	}
 	if cfg.OvpnPort == "" {
 		cfg.OvpnPort = "1194"
@@ -353,6 +344,21 @@ func ovpnAttach(db *sql.DB, cfg Config, p Peer) string {
 	return ip
 }
 
+// ovpnAttachNewUser attaches OpenVPN to a user row inserted moments ago for an OVPN-only
+// account. If attaching dies (typically "no free IP"), the row and any CCD file are removed
+// before the error propagates — otherwise a "ghost" user with no WG and no OVPN identity is
+// left behind, unusable but counted and listed.
+func ovpnAttachNewUser(db *sql.DB, cfg Config, p Peer) string {
+	defer func() {
+		if r := recover(); r != nil {
+			db.Exec("DELETE FROM peers WHERE id=?", p.ID)
+			ovpnRemoveCCD(cfg, p.Username)
+			panic(r)
+		}
+	}()
+	return ovpnAttach(db, cfg, p)
+}
+
 // ovpnRemoveCCD deletes /etc/openvpn/ccd/<username>. Called from ovpnDetach (removing just
 // the OVPN identity while keeping the wgmgr user) and from the whole-user delete paths
 // (cmdRemove / deletePeer). With ccd-exclusive on, OpenVPN refuses any client whose CN has
@@ -392,6 +398,8 @@ func ovpnConfigForPeer(cfg Config, p Peer) string {
 func cmdOvpnInit(args []string) {
 	_, flags := parseFlags(args)
 	cfg := loadConfig()
+	_, subnetFlag := flags["subnet"]
+	choosingSubnet := cfg.OvpnSubnet == "" || subnetFlag // first setup or explicit change
 	for k, set := range map[string]func(string){
 		"dir":     func(v string) { cfg.OvpnDir = v },
 		"subnet":  func(v string) { cfg.OvpnSubnet = v },
@@ -409,6 +417,14 @@ func cmdOvpnInit(args []string) {
 		}
 	}
 	ovpnDefaults(&cfg)
+	// Both pools route through this host; overlapping them collides tunnel IPs. Only checked
+	// when the subnet is being chosen, so a routine update never aborts on an existing layout.
+	if choosingSubnet && cfg.WGConf != "" && fileExists(cfg.WGConf) {
+		_, wn, _ := interfaceHead(cfg.WGConf)
+		if _, on, err := net.ParseCIDR(cfg.OvpnSubnet); err == nil && netsOverlap(wn, on) {
+			die("openvpn subnet %s overlaps the WireGuard pool %s — pass a different --subnet (e.g. 10.9.0.0/16)", on, wn)
+		}
+	}
 	if v, ok := flags["endpoint"]; ok {
 		cfg.OvpnEndpoint = v
 	}

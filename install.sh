@@ -21,7 +21,7 @@ config_json_value(){
 # /etc/wireguard/{params,wg0.conf} format wgmgr expects. Override via WG_PORT/WG_SUBNET/WG_DNS1/WG_DNS2.
 bootstrap_wireguard(){
   say "no WireGuard found — setting up a fresh native WireGuard server…"
-  local port="${WG_PORT:-51820}" subnet="${WG_SUBNET:-10.66.66.0/24}"
+  local port="${WG_PORT:-51820}" subnet="${WG_SUBNET:-10.66.0.0/16}"
   local dns1="${WG_DNS1:-1.1.1.1}" dns2="${WG_DNS2:-1.0.0.1}"
   local nic; nic="$(ip -4 route ls default 2>/dev/null | awk '{print $5; exit}')"
   [ -n "$nic" ] || { err "could not detect the default network interface"; exit 1; }
@@ -97,14 +97,20 @@ json_value() {
   sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$CONFIG" | head -n 1
 }
 
+# Dotted mask -> prefix length. Anything empty/odd falls back to 24 — never 0, which would
+# turn the NAT/forward rules below into "-s x.x.x.x/0" (= every source).
 mask_to_cidr() {
-  case "$1" in
-    255.255.255.255) echo 32 ;;
-    255.255.255.0) echo 24 ;;
-    255.255.0.0) echo 16 ;;
-    255.0.0.0) echo 8 ;;
-    *) echo 24 ;;
-  esac
+  local bits=0 o
+  for o in $(echo "$1" | tr '.' ' '); do
+    case "$o" in
+      255) bits=$((bits+8)) ;; 254) bits=$((bits+7)) ;; 252) bits=$((bits+6)) ;;
+      248) bits=$((bits+5)) ;; 240) bits=$((bits+4)) ;; 224) bits=$((bits+3)) ;;
+      192) bits=$((bits+2)) ;; 128) bits=$((bits+1)) ;; 0) ;;
+      *) echo 24; return ;;
+    esac
+  done
+  [ "$bits" -ge 8 ] || bits=24
+  echo "$bits"
 }
 
 subnet="$(json_value ovpn_subnet)"
@@ -116,7 +122,7 @@ if [ -z "$subnet" ] && [ -r "$OVPN_CONF" ]; then
   mask="$(awk '/^server /{print $3; exit}' "$OVPN_CONF")"
   [ -n "$net" ] && subnet="$net/$(mask_to_cidr "$mask")"
 fi
-[ -n "$subnet" ] || subnet="10.8.0.0/24"
+[ -n "$subnet" ] || subnet="10.8.0.0/16"
 [ -n "$port" ] || port="$(awk '/^port /{print $2; exit}' "$OVPN_CONF" 2>/dev/null || true)"
 [ -n "$port" ] || port="1194"
 [ -n "$proto" ] || proto="$(awk '/^proto /{print $2; exit}' "$OVPN_CONF" 2>/dev/null || true)"
@@ -309,7 +315,7 @@ bootstrap_openvpn(){
   fi
   systemctl restart wgmgr.service >/dev/null 2>&1 || true  # reload config so the enforce loop reads ovpn_mgmt
   local subnet; subnet="$(sed -n 's/.*"ovpn_subnet"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' /etc/wgmgr/config.json 2>/dev/null)"
-  say "OpenVPN up: proto $(awk '/^proto/{print $2}' /etc/openvpn/server.conf) port $(awk '/^port/{print $2}' /etc/openvpn/server.conf) subnet ${subnet:-10.8.0.0/24}"
+  say "OpenVPN up: proto $(awk '/^proto/{print $2}' /etc/openvpn/server.conf) port $(awk '/^port/{print $2}' /etc/openvpn/server.conf) subnet ${subnet:-10.8.0.0/16}"
 }
 
 [ "$(id -u)" = 0 ] || { err "please run as root"; exit 1; }
@@ -335,6 +341,7 @@ if [ -f /etc/wgmgr/config.json ]; then
       INSTALL_OVPN=0
     fi
   fi
+  EXISTING_INSTALL=1
   say "existing install detected — updating the binary in place (VPN config preserved)"
 fi
 
@@ -414,6 +421,16 @@ if grep -q '\[Peer\]' "/etc/wireguard/${IFACE}.conf" 2>/dev/null; then
   "${PREFIX}/wgmgr" import || true
 fi
 "${PREFIX}/wgmgr" render || true
+
+# --- widen /24 user pools (pre-v1.8 installs cap at ~253 users) to /16 in place: users keep
+# their IPs, so existing client configs stay valid. Runs BEFORE the wgmgr restart below so a
+# panel-triggered update (which runs inside wgmgr.service) still reaches it. Opt out with
+# WGMGR_EXPAND_SUBNET=0; a clash with another network is reported and skipped, never fatal.
+# Updates only — a fresh install already defaults to /16 and keeps an explicit WG_SUBNET as
+# given. A /24 chosen on purpose is widened on later updates too; set WGMGR_EXPAND_SUBNET=0.
+if [ "${EXISTING_INSTALL:-0}" = "1" ] && [ "${WGMGR_EXPAND_SUBNET:-1}" != "0" ]; then
+  "${PREFIX}/wgmgr" expand-subnet --auto || err "subnet expansion failed — run 'wgmgr expand-subnet' by hand"
+fi
 
 # --- systemd service ---
 # OVPN-only installs have no wg-quick@ unit; keeping the After/Wants there is dead cruft.

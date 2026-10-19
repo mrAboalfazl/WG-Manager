@@ -45,16 +45,17 @@ curl -fsSL https://raw.githubusercontent.com/mrAboalfazl/WG-Manager/main/install
 # both, custom ports
 curl -fsSL https://raw.githubusercontent.com/mrAboalfazl/WG-Manager/main/install.sh | INSTALL_OVPN=1 WG_PORT=51820 OVPN_PORT=1194 bash
 # WireGuard only, custom port + subnet
-curl -fsSL https://raw.githubusercontent.com/mrAboalfazl/WG-Manager/main/install.sh | WG_PORT=53 WG_SUBNET=10.8.0.0/24 bash
+curl -fsSL https://raw.githubusercontent.com/mrAboalfazl/WG-Manager/main/install.sh | WG_PORT=53 WG_SUBNET=10.9.0.0/16 bash
 ```
 | Env var | Default | Meaning |
 |---|---|---|
 | `INSTALL_OVPN` | `0` | `1` = also install OpenVPN |
 | `INSTALL_WG` | `1` | `0` = OpenVPN-only (no WireGuard) |
-| `WG_PORT` / `WG_SUBNET` | `51820` / `10.66.66.0/24` | WireGuard UDP port / subnet |
-| `OVPN_PORT` / `OVPN_PROTO` / `OVPN_SUBNET` | `1194` / `udp` / `10.8.0.0/24` | OpenVPN port / proto / subnet |
+| `WG_PORT` / `WG_SUBNET` | `51820` / `10.66.0.0/16` | WireGuard UDP port / subnet (~65k users) |
+| `OVPN_PORT` / `OVPN_PROTO` / `OVPN_SUBNET` | `1194` / `udp` / `10.8.0.0/16` | OpenVPN port / proto / subnet (~65k users) |
 | `OVPN_ENDPOINT` | auto-detected | public IP/host clients dial (set this if the box is behind NAT) |
 | `OVPN_RECONFIGURE` | `0` | `1` = allow an update run to change an already-configured OpenVPN endpoint/port |
+| `WGMGR_EXPAND_SUBNET` | `1` | `0` = don't auto-widen old `/24` user pools to `/16` on update (see below) |
 
 After install:
 - **Panel:** served on a **secret web path** printed at the end of install, e.g.
@@ -87,6 +88,8 @@ wgmgr renew <user> <days>                     # extend time
 wgmgr enable|disable|rm <user>
 wgmgr set-login <user> <pass>                 # panel/admin credentials
 wgmgr set-base-path </path|/>                 # serve the panel/API under a secret web path (/ = root)
+wgmgr expand-subnet [--prefix 16] [--dry-run] [--yes]  # widen the user IP pools (more users, configs unchanged)
+wgmgr ghost-users [--delete]                  # list/delete users with no WireGuard and no OpenVPN identity
 wgmgr import                                  # import peers from wg0.conf into the DB
 wgmgr render                                  # rewrite wg0.conf peer section from DB + apply
 wgmgr serve                                   # daemon: enforcement loop + HTTPS API (systemd)
@@ -99,6 +102,23 @@ WG-Manager keeps the old VPN keys but uses the destination server endpoint/ports
 `--endpoint` value. If you expose the VPN through an Iran-node tunnel during normal operation, apply
 that endpoint translation in the consuming website/service, not in WG-Manager. Migration exports and
 bundles contain private keys and should be stored like secrets.
+
+## User capacity (IP pools)
+New installs use `/16` pools (`10.66.0.0/16` WireGuard, `10.8.0.0/16` OpenVPN) — about 65,000 users per
+protocol. Installs made before v1.8 used `/24` pools, which stop at ~253 users ("no free IP").
+
+Updating (panel **Update**, `wgmgr update`, or re-running `install.sh`) widens an old `/24` pool to `/16`
+**in place**: the server keeps its tunnel IP and every user keeps theirs, so **existing client configs keep
+working — nobody needs to re-download anything**. WireGuard blips for a second while the interface address is
+swapped; OpenVPN restarts once and clients reconnect on their own. Backups of `wg0.conf` / `server.conf` are
+written next to them, matching iptables rules are mirrored for the new range, and if the wider range would
+overlap another network on the host (e.g. a Docker bridge) the step is skipped with a warning.
+
+To run it by hand (or pick a different size): `wgmgr expand-subnet --dry-run`, then
+`wgmgr expand-subnet --yes` (add `--prefix 20` for ~4,000 users). Menu item **17** does the same.
+
+Older versions left a "ghost" user behind when adding an OpenVPN-only user failed on a full pool. If you hit
+the old limit, check with `wgmgr ghost-users` and remove them with `wgmgr ghost-users --delete`.
 
 ## API
 HTTPS + bearer token on `:8443`, under the **same secret web base path as the panel** (e.g.

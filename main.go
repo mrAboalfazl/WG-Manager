@@ -345,7 +345,7 @@ func interfaceHead(conf string) (head string, ipnet *net.IPNet, serverIP net.IP)
 	var headLines []string
 	for _, l := range lines {
 		t := strings.TrimSpace(l)
-		if t == peerMarker || t == "[Peer]" || strings.HasPrefix(t, "### Client") || strings.HasPrefix(t, "# >>> wgmgr") {
+		if isHeadEnd(t) {
 			break
 		}
 		headLines = append(headLines, l)
@@ -366,25 +366,49 @@ func interfaceHead(conf string) (head string, ipnet *net.IPNet, serverIP net.IP)
 	return strings.Join(headLines, "\n"), ipnet, serverIP
 }
 
+// isHeadEnd reports whether a (trimmed) wg0.conf line starts the peer section.
+func isHeadEnd(t string) bool {
+	return t == peerMarker || t == "[Peer]" || strings.HasPrefix(t, "### Client") || strings.HasPrefix(t, "# >>> wgmgr")
+}
+
+// confHead returns the [Interface] head of a wg0.conf body (everything before the peers).
+func confHead(conf string) string {
+	lines := strings.Split(conf, "\n")
+	for i, l := range lines {
+		if isHeadEnd(strings.TrimSpace(l)) {
+			return strings.Join(lines[:i], "\n")
+		}
+	}
+	return conf
+}
+
+// renderPeerSection renders the managed peer region (marker + one [Peer] per WG user).
+func renderPeerSection(db *sql.DB) string {
+	var b strings.Builder
+	b.WriteString("\n\n" + peerMarker + "\n")
+	for _, p := range allPeers(db) {
+		if p.PublicKey == "" {
+			continue // OVPN-only user — no WireGuard peer entry
+		}
+		b.WriteString(fmt.Sprintf("\n### wgmgr:%s\n[Peer]\nPublicKey = %s\n", p.Username, p.PublicKey))
+		if p.PSK != "" {
+			b.WriteString("PresharedKey = " + p.PSK + "\n")
+		}
+		b.WriteString("AllowedIPs = " + p.Address + "/32\n")
+	}
+	return b.String()
+}
+
 func nextFreeIP(db *sql.DB, conf string) string {
 	_, ipnet, serverIP := interfaceHead(conf)
 	used := map[string]bool{serverIP.String(): true}
 	for _, p := range allPeers(db) {
 		used[p.Address] = true
 	}
-	ip := serverIP.Mask(ipnet.Mask)
-	for i := 0; i < 65534; i++ {
-		ip = nextIP(ip)
-		if !ipnet.Contains(ip) {
-			break
-		}
-		s := ip.String()
-		if strings.HasSuffix(s, ".0") || used[s] {
-			continue
-		}
-		return s
+	if ip, ok := nextFreeHost(ipnet, used); ok {
+		return ip
 	}
-	die("no free IP in %s", ipnet.String())
+	die("no free IP in %s — widen the pool with `wgmgr expand-subnet` (existing configs keep working)", ipnet.String())
 	return ""
 }
 
@@ -434,21 +458,9 @@ func renderConf(db *sql.DB, cfg Config, force bool) {
 		}
 	}
 	head, _, _ := interfaceHead(cfg.WGConf)
-	var b strings.Builder
-	b.WriteString(strings.TrimRight(head, "\n"))
-	b.WriteString("\n\n" + peerMarker + "\n")
-	for _, p := range allPeers(db) {
-		if p.PublicKey == "" {
-			continue // OVPN-only user — no WireGuard peer entry
-		}
-		b.WriteString(fmt.Sprintf("\n### wgmgr:%s\n[Peer]\nPublicKey = %s\n", p.Username, p.PublicKey))
-		if p.PSK != "" {
-			b.WriteString("PresharedKey = " + p.PSK + "\n")
-		}
-		b.WriteString("AllowedIPs = " + p.Address + "/32\n")
-	}
+	conf := strings.TrimRight(head, "\n") + renderPeerSection(db)
 	tmp := cfg.WGConf + ".wgmgr.tmp"
-	if err := os.WriteFile(tmp, []byte(b.String()), 0o600); err != nil {
+	if err := os.WriteFile(tmp, []byte(conf), 0o600); err != nil {
 		die("write conf: %v", err)
 	}
 	if err := os.Rename(tmp, cfg.WGConf); err != nil {
@@ -710,7 +722,7 @@ func cmdAdd(args []string) {
 			die("insert: %v", err)
 		}
 		p, _ := getPeer(db, username)
-		ovpnAttach(db, cfg, p)
+		ovpnAttachNewUser(db, cfg, p)
 		p, _ = getPeer(db, username)
 		fmt.Print(ovpnConfigForPeer(cfg, p))
 		return
@@ -826,7 +838,8 @@ func setField(args []string, usage string, apply func(db *sql.DB, p Peer, cfg Co
 }
 
 func printUsage() {
-	fmt.Println("wgmgr <menu|status|restart|update|uninstall|export-users|import-users|export-bundle|import-bundle|init|import|add|rm|list|show|config|set-quota|renew|enable|disable|render|serve|set-login|set-base-path|ovpn-init|ovpn-add|ovpn-config|ovpn-rm|ovpn-orphans> ...")
+	fmt.Println("wgmgr <menu|status|restart|update|uninstall|export-users|import-users|export-bundle|import-bundle|init|import|add|rm|list|show|config|set-quota|renew|enable|disable|render|serve|set-login|set-base-path|expand-subnet|ovpn-init|ovpn-add|ovpn-config|ovpn-rm|ovpn-orphans|ghost-users> ...")
+	fmt.Println("expand-subnet flags: --prefix N (default 16) --dry-run --yes")
 	fmt.Println("uninstall flags: --yes --purge-data --purge-openvpn --purge-wireguard")
 	fmt.Println("Run `wgmgr` with no arguments on a terminal to open the management menu.")
 }
@@ -982,8 +995,36 @@ func cmdReinstall(args []string) {
 	}
 }
 
+// updateUnit is the transient systemd unit a panel-triggered update runs in.
+const updateUnit = "wgmgr-update"
+
+// updateLaunch returns the command that runs the installer for a panel-triggered update.
+// With systemd it runs as its own transient unit: a plain background child would live in
+// wgmgr.service's cgroup, so the installer's own `systemctl restart wgmgr` killed it midway
+// and every step after that restart (OpenVPN setup, firewall) silently never ran.
+func updateLaunch(haveSystemdRun bool) (string, []string) {
+	script := "(sleep 1; " + updateInstallerCommand + ") >/tmp/wgmgr-update.log 2>&1"
+	if haveSystemdRun {
+		return "systemd-run", []string{"--unit=" + updateUnit, "--collect", "--quiet",
+			"--description=WG-Manager update", "bash", "-c", script}
+	}
+	return "bash", []string{"-c", script + " &"}
+}
+
 func startUpdateAsync() error {
-	return exec.Command("bash", "-c", "(sleep 1; "+updateInstallerCommand+") >/tmp/wgmgr-update.log 2>&1 &").Start()
+	_, lookErr := exec.LookPath("systemd-run")
+	name, args := updateLaunch(lookErr == nil)
+	if name == "systemd-run" {
+		out, err := exec.Command(name, args...).CombinedOutput()
+		if err == nil {
+			return nil
+		}
+		if strings.Contains(string(out), "already") {
+			return fmt.Errorf("an update is already running (systemctl status %s)", updateUnit)
+		}
+		name, args = updateLaunch(false) // systemd-run unusable (no systemd as PID 1?)
+	}
+	return exec.Command(name, args...).Start()
 }
 
 func cmdExportUsers(args []string) {
@@ -1190,6 +1231,7 @@ func cmdMenu() {
 		fmt.Println(" 14) Export full migration bundle")
 		fmt.Println(" 15) Import full migration bundle")
 		fmt.Println(" 16) Uninstall")
+		fmt.Println(" 17) Expand user IP range (more users, configs unchanged)")
 		fmt.Println("  0) Exit")
 		switch readLine(r, "Select: ") {
 		case "1":
@@ -1289,6 +1331,16 @@ func cmdMenu() {
 		case "16":
 			cmdMenuUninstall(r)
 			return
+		case "17":
+			prefix := readDefault(r, "New prefix length: ", strconv.Itoa(defaultExpandPrefix))
+			func() {
+				defer func() {
+					if rec := recover(); rec != nil {
+						fmt.Println("failed:", rec)
+					}
+				}()
+				expandSubnet([]string{"--prefix", prefix}, r)
+			}()
 		case "0", "q", "quit", "exit":
 			return
 		default:
@@ -1404,8 +1456,12 @@ func main() {
 		cmdOvpnConfig(args)
 	case "ovpn-rm":
 		cmdOvpnRm(args)
+	case "expand-subnet":
+		cmdExpandSubnet(args)
 	case "ovpn-orphans":
 		cmdOvpnOrphans(args)
+	case "ghost-users":
+		cmdGhostUsers(args)
 	case "set-quota":
 		setField(args, "usage: wgmgr set-quota <username> <GB>", func(db *sql.DB, p Peer, cfg Config) {
 			if len(args) < 2 {
